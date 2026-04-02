@@ -1,0 +1,479 @@
+package applescript
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"SR-Player/internal/models"
+)
+
+// run executes an AppleScript string and returns the trimmed output.
+func run(script string) (string, error) {
+	cmd := exec.Command("osascript", "-e", script)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// runSilent executes an AppleScript and ignores output.
+func runSilent(script string) error {
+	cmd := exec.Command("osascript", "-e", script)
+	return cmd.Run()
+}
+
+// --- Playback Controls ---
+
+func PlayPause() error {
+	return runSilent(`tell application "Music" to playpause`)
+}
+
+func NextTrack() error {
+	return runSilent(`tell application "Music" to next track`)
+}
+
+func PreviousTrack() error {
+	return runSilent(`tell application "Music" to previous track`)
+}
+
+func Play() error {
+	return runSilent(`tell application "Music" to play`)
+}
+
+func Stop() error {
+	return runSilent(`tell application "Music" to stop`)
+}
+
+// --- Volume ---
+
+func GetVolume() (int, error) {
+	out, err := run(`tell application "Music" to sound volume`)
+	if err != nil {
+		return 0, err
+	}
+	v, err := strconv.Atoi(out)
+	if err != nil {
+		return 0, err
+	}
+	return v, nil
+}
+
+func SetVolume(v int) error {
+	if v < 0 {
+		v = 0
+	}
+	if v > 100 {
+		v = 100
+	}
+	return runSilent(fmt.Sprintf(`tell application "Music" to set sound volume to %d`, v))
+}
+
+// --- Player State ---
+
+func GetPlayerState() (models.PlayerState, error) {
+	out, err := run(`tell application "Music" to player state as string`)
+	if err != nil {
+		return models.StateStopped, err
+	}
+	switch strings.ToLower(out) {
+	case "playing":
+		return models.StatePlaying, nil
+	case "paused":
+		return models.StatePaused, nil
+	default:
+		return models.StateStopped, nil
+	}
+}
+
+func GetPlayerPosition() (float64, error) {
+	out, err := run(`tell application "Music" to player position`)
+	if err != nil {
+		return 0, err
+	}
+	pos, err := strconv.ParseFloat(out, 64)
+	if err != nil {
+		return 0, err
+	}
+	return pos, nil
+}
+
+func SetPlayerPosition(pos float64) error {
+	return runSilent(fmt.Sprintf(`tell application "Music" to set player position to %f`, pos))
+}
+
+// --- Shuffle & Repeat ---
+
+func GetShuffle() (bool, error) {
+	out, err := run(`tell application "Music" to shuffle enabled`)
+	if err != nil {
+		return false, err
+	}
+	return strings.ToLower(out) == "true", nil
+}
+
+func ToggleShuffle() error {
+	return runSilent(`tell application "Music" to set shuffle enabled to not shuffle enabled`)
+}
+
+func GetRepeatMode() (models.RepeatMode, error) {
+	out, err := run(`tell application "Music" to song repeat as string`)
+	if err != nil {
+		return models.RepeatOff, err
+	}
+	switch strings.ToLower(out) {
+	case "one":
+		return models.RepeatOne, nil
+	case "all":
+		return models.RepeatAll, nil
+	default:
+		return models.RepeatOff, nil
+	}
+}
+
+func ToggleRepeat() error {
+	current, err := GetRepeatMode()
+	if err != nil {
+		return err
+	}
+	var next string
+	switch current {
+	case models.RepeatOff:
+		next = "all"
+	case models.RepeatAll:
+		next = "one"
+	default:
+		next = "off"
+	}
+	return runSilent(fmt.Sprintf(`tell application "Music" to set song repeat to %s`, next))
+}
+
+// --- Current Track ---
+
+func GetCurrentTrack() (models.Track, error) {
+	script := `
+tell application "Music"
+	if player state is stopped then
+		return ""
+	end if
+	set t to current track
+	set trackName to name of t
+	set trackArtist to artist of t
+	set trackAlbum to album of t
+	set trackDuration to duration of t
+	return trackName & "||" & trackArtist & "||" & trackAlbum & "||" & trackDuration
+end tell`
+
+	out, err := run(script)
+	if err != nil || out == "" {
+		return models.Track{}, err
+	}
+
+	parts := strings.Split(out, "||")
+	if len(parts) < 4 {
+		return models.Track{}, fmt.Errorf("unexpected output: %s", out)
+	}
+
+	duration, _ := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
+
+	return models.Track{
+		Name:     strings.TrimSpace(parts[0]),
+		Artist:   strings.TrimSpace(parts[1]),
+		Album:    strings.TrimSpace(parts[2]),
+		Duration: duration,
+	}, nil
+}
+
+// GetNowPlaying returns the full playback state.
+func GetNowPlaying() (models.NowPlaying, error) {
+	state, _ := GetPlayerState()
+	track, _ := GetCurrentTrack()
+	pos, _ := GetPlayerPosition()
+	shuffle, _ := GetShuffle()
+	repeat, _ := GetRepeatMode()
+	vol, _ := GetVolume()
+
+	return models.NowPlaying{
+		Track:          track,
+		State:          state,
+		Position:       pos,
+		ShuffleEnabled: shuffle,
+		RepeatMode:     repeat,
+		Volume:         vol,
+	}, nil
+}
+
+// --- Playlists ---
+
+func GetPlaylists() ([]models.Playlist, error) {
+	script := `
+tell application "Music"
+	set output to ""
+	set allPlaylists to every playlist
+	repeat with p in allPlaylists
+		set pKind to special kind of p as string
+		if pKind is "none" or pKind is "Music" or pKind is "music" then
+			try
+				set pCount to count of tracks of p
+				set output to output & name of p & "||" & pCount & "\n"
+			end try
+		end if
+	end repeat
+	return output
+end tell`
+
+	out, err := run(script)
+	if err != nil {
+		return nil, err
+	}
+
+	var playlists []models.Playlist
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "||", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		count, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+		playlists = append(playlists, models.Playlist{
+			Name:  strings.TrimSpace(parts[0]),
+			Count: count,
+		})
+	}
+	return playlists, nil
+}
+
+func PlayPlaylist(name string) error {
+	script := fmt.Sprintf(`tell application "Music" to play playlist "%s"`, name)
+	return runSilent(script)
+}
+
+// GetPlaylistTracks returns tracks in the named playlist with pagination.
+func GetPlaylistTracks(playlistName string, offset, limit int) ([]models.Track, error) {
+	startIdx := offset + 1
+	endIdx := offset + limit
+
+	script := fmt.Sprintf(`
+tell application "Music"
+	set output to ""
+	set pl to playlist "%s"
+	set totalCount to count of tracks of pl
+	set startIdx to %d
+	set endIdx to %d
+	if startIdx > totalCount then return ""
+	if endIdx > totalCount then set endIdx to totalCount
+	
+	repeat with i from startIdx to endIdx
+		set t to track i of pl
+		set tName to name of t
+		set tArtist to artist of t
+		set tAlbum to album of t
+		set tDuration to duration of t as string
+		set output to output & tName & "||" & tArtist & "||" & tAlbum & "||" & tDuration & "\n"
+	end repeat
+	return output
+end tell`, playlistName, startIdx, endIdx)
+
+	out, err := run(script)
+	if err != nil || out == "" {
+		return nil, err
+	}
+
+	var tracks []models.Track
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "||", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		dur, _ := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
+		tracks = append(tracks, models.Track{
+			Name:     strings.TrimSpace(parts[0]),
+			Artist:   strings.TrimSpace(parts[1]),
+			Album:    strings.TrimSpace(parts[2]),
+			Duration: dur,
+		})
+	}
+	return tracks, nil
+}
+
+// PlayTrackInPlaylist plays a specific track by index in a named playlist.
+func PlayTrackInPlaylist(playlistName string, trackIndex int) error {
+	// IMPORTANTE: En AppleScript, referenciar el track directamente en la misma línea del comando 'play'
+	// es OBLIGATORIO para que Apple Music asuma el "Contexto" de la playlist.
+	// Esto garantiza que la Cola de Reproducción (Queue) contenga las siguientes canciones de ESTA playlist.
+	// Si se asignaba a una variable primero (set t to track...), se resolvía al ID global y se perdía el contexto.
+	script := fmt.Sprintf(`
+tell application "Music"
+	play track %d of playlist "%s"
+end tell`, trackIndex, playlistName)
+	return runSilent(script)
+}
+
+// PlayTrackByName plays the first track matching name in the library.
+func PlayTrackByName(name string) error {
+	script := fmt.Sprintf(`tell application "Music" to play track "%s"`, name)
+	return runSilent(script)
+}
+
+// --- Queue (current playlist tracks) ---
+
+func GetQueueTracks() ([]models.QueueTrack, error) {
+	script := `
+tell application "Music"
+	if player state is stopped then
+		return ""
+	end if
+	set currentTrackName to name of current track
+	set currentTrackArtist to artist of current track
+	set pl to current playlist
+	set output to ""
+	set i to 1
+	repeat with t in tracks of pl
+		set isCurrent to "0"
+		if name of t is currentTrackName and artist of t is currentTrackArtist then
+			set isCurrent to "1"
+		end if
+		set output to output & i & "||" & name of t & "||" & artist of t & "||" & isCurrent & "\n"
+		set i to i + 1
+		if i > 50 then exit repeat
+	end repeat
+	return output
+end tell`
+
+	out, err := run(script)
+	if err != nil || out == "" {
+		return nil, err
+	}
+
+	var tracks []models.QueueTrack
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "||", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		idx, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+		tracks = append(tracks, models.QueueTrack{
+			Index: idx,
+			Track: models.Track{
+				Name:   strings.TrimSpace(parts[1]),
+				Artist: strings.TrimSpace(parts[2]),
+			},
+			IsCurrent: strings.TrimSpace(parts[3]) == "1",
+		})
+	}
+	return tracks, nil
+}
+
+// --- Search ---
+
+func SearchLibrary(query string) ([]models.Track, error) {
+	script := fmt.Sprintf(`
+tell application "Music"
+	set results to search playlist "Library" for "%s"
+	set output to ""
+	set i to 0
+	repeat with t in results
+		set output to output & name of t & "||" & artist of t & "||" & album of t & "\n"
+		set i to i + 1
+		if i >= 30 then exit repeat
+	end repeat
+	return output
+end tell`, query)
+
+	out, err := run(script)
+	if err != nil || out == "" {
+		return nil, err
+	}
+
+	var tracks []models.Track
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "||", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		tracks = append(tracks, models.Track{
+			Name:   strings.TrimSpace(parts[0]),
+			Artist: strings.TrimSpace(parts[1]),
+			Album:  strings.TrimSpace(parts[2]),
+		})
+	}
+	return tracks, nil
+}
+
+
+// --- Artwork ---
+
+// GetArtworkPath extracts the current track's artwork to a unique JPEG file and
+// returns its path. Returns "" if no artwork is available.
+func GetArtworkPath() string {
+	// Clean up any old artwork files to prevent filling up /tmp
+	oldFiles, _ := filepath.Glob("/tmp/sr-player-art-*.jpg")
+	for _, f := range oldFiles {
+		os.Remove(f)
+	}
+
+	// Check if Music is running and playing
+	stateOut, err := run(`tell application "Music" to player state as string`)
+	if err != nil || strings.ToLower(stateOut) == "stopped" {
+		return ""
+	}
+
+	// Generate a guaranteed unique path for cache-busting the UI
+	artworkCachePath := fmt.Sprintf("/tmp/sr-player-art-%d.jpg", time.Now().UnixNano())
+
+	script := fmt.Sprintf(`
+tell application "Music"
+	try
+		set t to current track
+		set artList to artworks of t
+		if (count of artList) is 0 then return ""
+		set art to item 1 of artList
+		set artData to raw data of art
+		set filePath to "%s"
+		set fileRef to open for access POSIX file filePath with write permission
+		set eof fileRef to 0
+		write artData to fileRef
+		close access fileRef
+		return filePath
+	on error
+		return ""
+	end try
+end tell`, artworkCachePath)
+
+	out, err := run(script)
+	if err != nil || out == "" {
+		return ""
+	}
+
+	// Verify the file exists and has content
+	info, err := os.Stat(artworkCachePath)
+	if err != nil || info.Size() == 0 {
+		return ""
+	}
+
+	return artworkCachePath
+}
