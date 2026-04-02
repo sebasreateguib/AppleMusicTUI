@@ -26,7 +26,7 @@ type NowPlayingPanel struct {
 var (
 	npFocusedStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#1DB954")).
+			BorderForeground(lipgloss.Color("#FA243C")).
 			Padding(0, 1)
 
 	npBlurredStyle = lipgloss.NewStyle().
@@ -39,7 +39,7 @@ var (
 			Foreground(lipgloss.Color("#FFFFFF"))
 
 	trackArtistStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#1DB954"))
+				Foreground(lipgloss.Color("#FA243C"))
 
 	trackAlbumStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#888888")).
@@ -195,7 +195,7 @@ func renderVisualizer(tick int, width int, height int, isPlaying bool) string {
 	blocks := []string{" ", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
 
 	var out strings.Builder
-	for y := height - 1; y >= 0; y-- {
+	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			// Leave a space between bars so they look like distinct vertical columns
 			if x%2 != 0 {
@@ -221,7 +221,10 @@ func renderVisualizer(tick int, width int, height int, isPlaying bool) string {
 				h = int(val * float64(height*8))
 			}
 
-			cellH := h - (height-1-y)*8
+			// Invertimos la lógica para que la barra crezca desde la base (la base está en la línea 'height-1')
+			baseVal := (height - 1 - y) * 8
+			cellH := h - baseVal
+			
 			if cellH < 0 {
 				cellH = 0
 			}
@@ -229,7 +232,7 @@ func renderVisualizer(tick int, width int, height int, isPlaying bool) string {
 				cellH = 7
 			}
 
-			color := lipgloss.Color("#1DB954")
+			color := lipgloss.Color("#FA243C")
 
 			if cellH == 0 {
 				out.WriteString(" ")
@@ -237,7 +240,7 @@ func renderVisualizer(tick int, width int, height int, isPlaying bool) string {
 				out.WriteString(lipgloss.NewStyle().Foreground(color).Render(blocks[cellH]))
 			}
 		}
-		if y > 0 {
+		if y < height-1 {
 			out.WriteString("\n")
 		}
 	}
@@ -279,7 +282,7 @@ func (n *NowPlayingPanel) View(tick int) string {
 	if isPlaying {
 		stateIcon = "▶"
 	}
-	stateStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#1DB954")).Bold(true)
+	stateStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FA243C")).Bold(true)
 	stateLine := stateStyle.Render(stateIcon + "  " + string(np.State))
 
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#444444"))

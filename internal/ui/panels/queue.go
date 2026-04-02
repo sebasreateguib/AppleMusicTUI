@@ -38,7 +38,7 @@ type QueuePanel struct {
 var (
 	queueFocusedStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#1DB954")).
+				BorderForeground(lipgloss.Color("#FA243C")).
 				Padding(0, 1)
 
 	queueBlurredStyle = lipgloss.NewStyle().
@@ -50,11 +50,11 @@ var (
 func NewQueuePanel(width, height int) QueuePanel {
 	delegate := list.NewDefaultDelegate()
 	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
-		Foreground(lipgloss.Color("#1DB954")).
-		BorderLeftForeground(lipgloss.Color("#1DB954"))
+		Foreground(lipgloss.Color("#FA243C")).
+		BorderLeftForeground(lipgloss.Color("#FA243C"))
 	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.
-		Foreground(lipgloss.Color("#1DB954")).
-		BorderLeftForeground(lipgloss.Color("#1DB954"))
+		Foreground(lipgloss.Color("#FA243C")).
+		BorderLeftForeground(lipgloss.Color("#FA243C"))
 
 	// Highlight current track in green
 	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.

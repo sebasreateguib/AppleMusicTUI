@@ -18,11 +18,11 @@ type Layout struct {
 
 var (
 	tabActiveStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#1DB954")).
+			Foreground(lipgloss.Color("#FA243C")).
 			Bold(true).
 			Padding(0, 1).
 			Border(lipgloss.NormalBorder(), false, false, true, false).
-			BorderForeground(lipgloss.Color("#1DB954"))
+			BorderForeground(lipgloss.Color("#FA243C"))
 
 	tabInactiveStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#555555")).

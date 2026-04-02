@@ -21,13 +21,13 @@ var (
 			Padding(0, 2)
 
 	progressFilledStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#1DB954"))
+				Foreground(lipgloss.Color("#FA243C"))
 
 	progressEmptyStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#333333"))
 
 	controlActiveStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#1DB954")).
+				Foreground(lipgloss.Color("#FA243C")).
 				Bold(true)
 
 	controlInactiveStyle = lipgloss.NewStyle().

@@ -70,7 +70,7 @@ type TrackListPanel struct {
 var (
 	trackListFocusedStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#1DB954")).
+				BorderForeground(lipgloss.Color("#FA243C")).
 				Padding(0, 1)
 
 	trackListBlurredStyle = lipgloss.NewStyle().

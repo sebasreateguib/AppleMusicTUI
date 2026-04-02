@@ -217,7 +217,7 @@ tell application "Music"
 	set allPlaylists to every playlist
 	repeat with p in allPlaylists
 		set pKind to special kind of p as string
-		if pKind is "none" or pKind is "Music" or pKind is "music" then
+		if pKind is "none" then
 			try
 				set pCount to count of tracks of p
 				set output to output & name of p & "||" & pCount & "\n"
@@ -258,22 +258,85 @@ func PlayPlaylist(name string) error {
 }
 
 // GetPlaylistTracks returns tracks in the named playlist with pagination.
-func GetPlaylistTracks(playlistName string, offset, limit int) ([]models.Track, error) {
+func GetUniqueArtists() ([]string, error) {
+	script := `
+tell application "Music"
+	set myartists to artist of tracks of playlist "Library"
+	set AppleScript's text item delimiters to "||"
+	return myartists as string
+end tell`
+
+	out, err := run(script)
+	if err != nil {
+		return nil, err
+	}
+
+	unique := make(map[string]bool)
+	var result []string
+	parts := strings.Split(out, "||")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" && !unique[p] {
+			unique[p] = true
+			result = append(result, p)
+		}
+	}
+	return result, nil
+}
+
+func GetUniqueAlbums() ([]string, error) {
+	script := `
+tell application "Music"
+	set myalbums to album of tracks of playlist "Library"
+	set AppleScript's text item delimiters to "||"
+	return myalbums as string
+end tell`
+
+	out, err := run(script)
+	if err != nil {
+		return nil, err
+	}
+
+	unique := make(map[string]bool)
+	var result []string
+	parts := strings.Split(out, "||")
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" && !unique[p] {
+			unique[p] = true
+			result = append(result, p)
+		}
+	}
+	return result, nil
+}
+
+// GetFilteredTracks returns tracks paginated based on context: "playlist", "artist", "album", "library"
+func GetFilteredTracks(contextType, contextValue string, offset, limit int) ([]models.Track, error) {
 	startIdx := offset + 1
 	endIdx := offset + limit
 
 	script := fmt.Sprintf(`
 tell application "Music"
 	set output to ""
-	set pl to playlist "%s"
-	set totalCount to count of tracks of pl
+	
+	if "%s" is "playlist" then
+		set trackList to (tracks of playlist "%s")
+	else if "%s" is "artist" then
+		set trackList to (tracks of playlist "Library" whose artist is "%s")
+	else if "%s" is "album" then
+		set trackList to (tracks of playlist "Library" whose album is "%s")
+	else if "%s" is "library" then
+		set trackList to tracks of playlist "Library"
+	end if
+	
+	set totalCount to count of trackList
 	set startIdx to %d
 	set endIdx to %d
 	if startIdx > totalCount then return ""
 	if endIdx > totalCount then set endIdx to totalCount
 	
 	repeat with i from startIdx to endIdx
-		set t to track i of pl
+		set t to item i of trackList
 		set tName to name of t
 		set tArtist to artist of t
 		set tAlbum to album of t
@@ -281,7 +344,7 @@ tell application "Music"
 		set output to output & tName & "||" & tArtist & "||" & tAlbum & "||" & tDuration & "\n"
 	end repeat
 	return output
-end tell`, playlistName, startIdx, endIdx)
+end tell`, contextType, contextValue, contextType, contextValue, contextType, contextValue, contextType, startIdx, endIdx)
 
 	out, err := run(script)
 	if err != nil || out == "" {
@@ -310,18 +373,26 @@ end tell`, playlistName, startIdx, endIdx)
 	return tracks, nil
 }
 
-// PlayTrackInPlaylist plays a specific track by index in a named playlist.
-func PlayTrackInPlaylist(playlistName string, trackIndex int) error {
-	// IMPORTANTE: En AppleScript, referenciar el track directamente en la misma línea del comando 'play'
-	// es OBLIGATORIO para que Apple Music asuma el "Contexto" de la playlist.
-	// Esto garantiza que la Cola de Reproducción (Queue) contenga las siguientes canciones de ESTA playlist.
-	// Si se asignaba a una variable primero (set t to track...), se resolvía al ID global y se perdía el contexto.
+func PlayTrackInContext(contextType, contextValue string, trackIndex int) error {
 	script := fmt.Sprintf(`
 tell application "Music"
-	play track %d of playlist "%s"
-end tell`, trackIndex, playlistName)
+	if "%s" is "playlist" then
+		play track %d of playlist "%s"
+	else if "%s" is "artist" then
+		set tList to (tracks of playlist "Library" whose artist is "%s")
+		play item %d of tList
+	else if "%s" is "album" then
+		set tList to (tracks of playlist "Library" whose album is "%s")
+		play item %d of tList
+	else if "%s" is "library" then
+		play track %d of playlist "Library"
+	end if
+end tell`, contextType, trackIndex, contextValue, contextType, contextValue, trackIndex, contextType, contextValue, trackIndex, contextType, trackIndex)
+	
 	return runSilent(script)
 }
+
+
 
 // PlayTrackByName plays the first track matching name in the library.
 func PlayTrackByName(name string) error {
@@ -334,24 +405,29 @@ func PlayTrackByName(name string) error {
 func GetQueueTracks() ([]models.QueueTrack, error) {
 	script := `
 tell application "Music"
-	if player state is stopped then
+	if player state is stopped then return ""
+	try
+		set t to current track
+		set pl to current playlist
+		set idx to index of t
+		set total to count of tracks of pl
+		
+		set maxIdx to idx + 10
+		if maxIdx > total then set maxIdx to total
+		
+		set output to ""
+		repeat with i from idx to maxIdx
+			set tr to track i of pl
+			set tName to name of tr
+			set tArtist to artist of tr
+			set isCurrent to "0"
+			if i is idx then set isCurrent to "1"
+			set output to output & i & "||" & tName & "||" & tArtist & "||" & isCurrent & "\n"
+		end repeat
+		return output
+	on error
 		return ""
-	end if
-	set currentTrackName to name of current track
-	set currentTrackArtist to artist of current track
-	set pl to current playlist
-	set output to ""
-	set i to 1
-	repeat with t in tracks of pl
-		set isCurrent to "0"
-		if name of t is currentTrackName and artist of t is currentTrackArtist then
-			set isCurrent to "1"
-		end if
-		set output to output & i & "||" & name of t & "||" & artist of t & "||" & isCurrent & "\n"
-		set i to i + 1
-		if i > 50 then exit repeat
-	end repeat
-	return output
+	end try
 end tell`
 
 	out, err := run(script)

@@ -14,11 +14,19 @@ type tickMsg time.Time
 type nowPlayingMsg models.NowPlaying
 type artworkMsg string
 type playlistsMsg []models.Playlist
-type playlistTracksMsg struct {
-	name   string
-	offset int
-	tracks []models.Track
+
+type contextTracksMsg struct {
+	contextType  string
+	contextValue string
+	offset       int
+	tracks       []models.Track
 }
+
+type uniqueStringsMsg struct {
+	kind  string // "artists" or "albums"
+	items []string
+}
+
 type queueMsg []models.QueueTrack
 type searchResultsMsg []models.Track
 
@@ -34,13 +42,15 @@ const (
 type CenterView int
 
 const (
-	CenterPlaylistTracks CenterView = iota
+	CenterContextTracks CenterView = iota
 	CenterSearchResults
+	CenterStringList
 )
 
 type App struct {
 	playlistPanel   panels.PlaylistsPanel
 	trackListPanel  panels.TrackListPanel
+	stringListPanel panels.StringListPanel
 	nowPlayingPanel panels.NowPlayingPanel
 	queuePanel      panels.QueuePanel
 	searchPanel     panels.SearchPanel
@@ -55,8 +65,10 @@ type App struct {
 	tick                 int
 	width                int
 	height               int
-	currentPlaylist      string
-	currentPlaylistTotal int
+
+	currentContextType   string
+	currentContextValue  string
+	currentContextTotal  int
 	fetchingTracks       bool
 }
 
@@ -67,13 +79,14 @@ func NewApp(width, height int) App {
 	app := App{
 		playlistPanel:   panels.NewPlaylistsPanel(leftW, mainH),
 		trackListPanel:  panels.NewTrackListPanel(centerW, mainH),
+		stringListPanel: panels.NewStringListPanel(centerW, mainH, "Library"),
 		nowPlayingPanel: panels.NewNowPlayingPanel(rightW, mainH-1),
 		queuePanel:      panels.NewQueuePanel(rightW, mainH-1),
 		searchPanel:     panels.NewSearchPanel(width, mainH),
 		statusBar:       NewStatusBar(width),
 		layout:          tmpLayout,
 		rightView:       ViewNowPlaying,
-		centerView:      CenterPlaylistTracks,
+		centerView:      CenterContextTracks,
 		focus:           focusPlaylists,
 		width:           width,
 		height:          height,
@@ -124,10 +137,23 @@ func fetchQueue() tea.Cmd {
 	}
 }
 
-func fetchPlaylistTracks(name string, offset, limit int) tea.Cmd {
+func fetchUniqueStrings(kind string) tea.Cmd {
 	return func() tea.Msg {
-		tracks, _ := applescript.GetPlaylistTracks(name, offset, limit)
-		return playlistTracksMsg{name: name, offset: offset, tracks: tracks}
+		var items []string
+		if kind == "artists" {
+			items, _ = applescript.GetUniqueArtists()
+		} else if kind == "albums" {
+			items, _ = applescript.GetUniqueAlbums()
+		}
+		return uniqueStringsMsg{kind: kind, items: items}
+	}
+}
+
+// limit reduced to 30 as requested
+func fetchContextTracks(cType, cVal string, offset, limit int) tea.Cmd {
+	return func() tea.Msg {
+		tracks, _ := applescript.GetFilteredTracks(cType, cVal, offset, limit)
+		return contextTracksMsg{contextType: cType, contextValue: cVal, offset: offset, tracks: tracks}
 	}
 }
 
@@ -192,18 +218,9 @@ func doSeek(delta float64, current float64) tea.Cmd {
 	}
 }
 
-func doPlayPlaylist(name string) tea.Cmd {
+func doPlayTrackInContext(cType, cVal string, index int) tea.Cmd {
 	return func() tea.Msg {
-		_ = applescript.PlayPlaylist(name)
-		time.Sleep(500 * time.Millisecond)
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
-}
-
-func doPlayTrackInPlaylist(playlist string, index int) tea.Cmd {
-	return func() tea.Msg {
-		_ = applescript.PlayTrackInPlaylist(playlist, index)
+		_ = applescript.PlayTrackInContext(cType, cVal, index)
 		time.Sleep(400 * time.Millisecond)
 		np, _ := applescript.GetNowPlaying()
 		return nowPlayingMsg(np)
@@ -232,6 +249,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		leftW, centerW, rightW, mainH := a.layout.PanelSizes()
 		a.playlistPanel.SetSize(leftW, mainH)
 		a.trackListPanel.SetSize(centerW, mainH)
+		a.stringListPanel.SetSize(centerW, mainH)
 		a.nowPlayingPanel.SetSize(rightW, mainH-1)
 		a.queuePanel.SetSize(rightW, mainH-1)
 		a.statusBar.SetWidth(msg.Width)
@@ -247,7 +265,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		if a.centerView == CenterPlaylistTracks {
+		if a.centerView == CenterContextTracks {
 			a.trackListPanel.SetCurrentTrack(a.nowPlaying.Track.Name)
 		}
 
@@ -271,11 +289,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case playlistsMsg:
 		a.playlistPanel.SetPlaylists([]models.Playlist(msg))
 
-	case playlistTracksMsg:
+	case uniqueStringsMsg:
+		title := "Artists"
+		if msg.kind == "albums" {
+			title = "Albums"
+		}
+		a.stringListPanel.SetItems(msg.items, title)
+
+	case contextTracksMsg:
 		a.fetchingTracks = false
-		if msg.name == a.currentPlaylist {
+		if msg.contextType == a.currentContextType && msg.contextValue == a.currentContextValue {
 			if msg.offset == 0 {
-				a.trackListPanel.SetTracks(msg.name, msg.tracks, a.nowPlaying.Track.Name)
+				title := msg.contextValue
+				if msg.contextType == "library" {
+					title = "Songs"
+				}
+				a.trackListPanel.SetTracks(title, msg.tracks, a.nowPlaying.Track.Name)
 			} else {
 				cmd := a.trackListPanel.AppendTracks(msg.tracks)
 				cmds = append(cmds, cmd)
@@ -306,7 +335,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			default:
 				var cmd tea.Cmd
-				// Propagate to search input
 				cmd, _ = a.searchPanel.Update(msg)
 				cmds = append(cmds, cmd)
 			}
@@ -395,31 +423,68 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			switch a.focus {
 			case focusPlaylists:
-				pl := a.playlistPanel.SelectedPlaylist()
-				if pl != nil {
+				item := a.playlistPanel.SelectedItem()
+				if item != nil && item.Kind != "separator" {
 					a.focus = focusCenter
-					a.centerView = CenterPlaylistTracks
-					a.updateFocusStyles()
+					
+					if item.Kind == "artists" || item.Kind == "albums" {
+						a.centerView = CenterStringList
+						a.stringListPanel.SetItems([]string{"Loading..."}, item.TitleStr)
+						cmds = append(cmds, fetchUniqueStrings(item.Kind))
+					} else {
+						a.centerView = CenterContextTracks
+						
+						cType := "playlist"
+						cVal := item.Value
+						if item.Kind == "songs" {
+							cType = "library"
+							cVal = ""
+						}
 
-					a.currentPlaylist = pl.Name
-					a.currentPlaylistTotal = pl.Count
-					a.fetchingTracks = true
-					a.trackListPanel.SetTracks(pl.Name, []models.Track{}, a.nowPlaying.Track.Name)
-					cmds = append(cmds, fetchPlaylistTracks(pl.Name, 0, 50))
+						a.currentContextType = cType
+						a.currentContextValue = cVal
+						// Arbitrary large value for library limit
+						a.currentContextTotal = 999999 
+						a.fetchingTracks = true
+						a.trackListPanel.SetTracks("Loading...", []models.Track{}, "")
+						
+						// Limit pagination to 30 items
+						cmds = append(cmds, fetchContextTracks(cType, cVal, 0, 30))
+					}
+					a.updateFocusStyles()
 				}
 
 			case focusCenter:
-				if a.centerView == CenterPlaylistTracks {
+				if a.centerView == CenterContextTracks {
 					idx := a.trackListPanel.SelectedTrackIndex()
-					playlist := a.trackListPanel.PlaylistName()
-					if idx > 0 && playlist != "" {
-						cmds = append(cmds, doPlayTrackInPlaylist(playlist, idx))
+					if idx > 0 && a.currentContextType != "" {
+						cmds = append(cmds, doPlayTrackInContext(a.currentContextType, a.currentContextValue, idx))
 					}
 				} else if a.centerView == CenterSearchResults {
 					track := a.searchPanel.SelectedTrack()
 					if track != nil {
 						cmds = append(cmds, doPlayTrack(track.Name))
 						a.rightView = ViewNowPlaying
+						a.updateFocusStyles()
+					}
+				} else if a.centerView == CenterStringList {
+					// We selected an artist or an album
+					selectedStr := a.stringListPanel.SelectedItem()
+					if selectedStr != "" && selectedStr != "Loading..." {
+						cType := "artist"
+						if a.playlistPanel.SelectedItem().Kind == "albums" {
+							cType = "album"
+						}
+						
+						a.centerView = CenterContextTracks
+						a.currentContextType = cType
+						a.currentContextValue = selectedStr
+						a.currentContextTotal = 999999
+						a.fetchingTracks = true
+						a.trackListPanel.SetTracks("Loading...", []models.Track{}, "")
+						
+						// Fetch 30 items limit
+						cmds = append(cmds, fetchContextTracks(cType, selectedStr, 0, 30))
 						a.updateFocusStyles()
 					}
 				}
@@ -431,19 +496,22 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmd := a.playlistPanel.Update(msg)
 				cmds = append(cmds, cmd)
 			case focusCenter:
-				if a.centerView == CenterPlaylistTracks {
+				if a.centerView == CenterContextTracks {
 					cmd := a.trackListPanel.Update(msg)
 					cmds = append(cmds, cmd)
 
 					idx := a.trackListPanel.SelectedTrackIndex()
 					loaded := len(a.trackListPanel.GetTracks())
-					if idx >= loaded-10 && loaded < a.currentPlaylistTotal && !a.fetchingTracks {
+					// Pagination boundary hit? load next 30
+					if idx >= loaded-10 && loaded < a.currentContextTotal && !a.fetchingTracks {
 						a.fetchingTracks = true
-						cmds = append(cmds, fetchPlaylistTracks(a.currentPlaylist, loaded, 50))
+						cmds = append(cmds, fetchContextTracks(a.currentContextType, a.currentContextValue, loaded, 30))
 					}
 				} else if a.centerView == CenterSearchResults {
-					// Route navigation to the search results
 					cmd, _ := a.searchPanel.Update(msg)
+					cmds = append(cmds, cmd)
+				} else if a.centerView == CenterStringList {
+					cmd := a.stringListPanel.Update(msg)
 					cmds = append(cmds, cmd)
 				}
 			case focusRight:
@@ -461,9 +529,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (a *App) updateFocusStyles() {
 	a.playlistPanel.SetFocused(a.focus == focusPlaylists)
-	a.trackListPanel.SetFocused(a.focus == focusCenter && a.centerView == CenterPlaylistTracks)
 	
-	// Para mantener los estilos coordinados
+	a.trackListPanel.SetFocused(a.focus == focusCenter && a.centerView == CenterContextTracks)
+	a.stringListPanel.SetFocused(a.focus == focusCenter && a.centerView == CenterStringList)
+
 	a.nowPlayingPanel.SetFocused(a.focus == focusRight && a.rightView == ViewNowPlaying)
 	a.queuePanel.SetFocused(a.focus == focusRight && a.rightView == ViewQueue)
 }
@@ -479,8 +548,10 @@ func (a App) View() string {
 	_, centerW, _, mainH := a.layout.PanelSizes()
 
 	var centerView string
-	if a.centerView == CenterPlaylistTracks {
+	if a.centerView == CenterContextTracks {
 		centerView = a.trackListPanel.View()
+	} else if a.centerView == CenterStringList {
+		centerView = a.stringListPanel.View()
 	} else {
 		centerView = a.searchPanel.ViewResults(centerW, mainH, a.focus == focusCenter)
 	}

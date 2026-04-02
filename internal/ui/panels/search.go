@@ -150,7 +150,7 @@ func (s *SearchPanel) ViewInput(width int, isFocused bool) string {
 	s.input.Width = width - 4
 	style := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#333333"))
 	if isFocused {
-		style = style.BorderForeground(lipgloss.Color("#1DB954"))
+		style = style.BorderForeground(lipgloss.Color("#FA243C"))
 	}
 	return style.Width(width - 2).Height(1).MaxWidth(width - 2).MaxHeight(3).Render(s.input.View())
 }
@@ -160,7 +160,7 @@ func (s *SearchPanel) ViewResults(width, height int, isFocused bool) string {
 	s.results.SetSize(width-4, height-2)
 	style := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#333333"))
 	if isFocused {
-		style = style.BorderForeground(lipgloss.Color("#1DB954"))
+		style = style.BorderForeground(lipgloss.Color("#FA243C"))
 	}
 	return style.Width(width - 2).Height(height - 2).MaxWidth(width - 2).MaxHeight(height - 2).Render(s.results.View())
 }
