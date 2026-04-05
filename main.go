@@ -14,7 +14,7 @@ import (
 )
 
 func printLogo() {
-	content, err := os.ReadFile("assets/am.txt")
+	content, err := os.ReadFile("assets/am-ascii.txt")
 	if err != nil {
 		// Si no existe el archivo, ignoramos la intro gráfica
 		return

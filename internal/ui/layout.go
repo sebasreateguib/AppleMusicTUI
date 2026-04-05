@@ -114,6 +114,5 @@ func renderTabBar(active RightView, width int) string {
 
 	bar := lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
 	return lipgloss.NewStyle().Width(width).MaxWidth(width).
-		Background(lipgloss.Color("#0a0a0a")).
 		Render(bar)
 }

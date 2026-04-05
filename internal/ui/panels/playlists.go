@@ -57,7 +57,6 @@ func createSidebarDelegate() list.DefaultDelegate {
 
 func NewPlaylistsPanel(width, height int) PlaylistsPanel {
 	libList := list.New([]list.Item{
-		SidebarItem{TitleStr: "Made For You", Kind: "songs"},
 		SidebarItem{TitleStr: "Albums", Kind: "albums"},
 		SidebarItem{TitleStr: "Artists", Kind: "artists"},
 		SidebarItem{TitleStr: "Songs", Kind: "songs"},
@@ -115,9 +114,6 @@ func renderLogo(width int) string {
 	for i, line := range lines {
 		out.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(colors[i])).Render(line) + "\n")
 	}
-	out.WriteString("\n")
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Render(" Apple Music TUI")
-	out.WriteString(title)
 
 	return lipgloss.NewStyle().Width(width).Align(lipgloss.Center).MarginBottom(1).Render(out.String())
 }
