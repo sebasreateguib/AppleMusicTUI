@@ -36,15 +36,8 @@ type QueuePanel struct {
 }
 
 var (
-	queueFocusedStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#FA243C")).
-				Padding(0, 1)
-
-	queueBlurredStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#333333")).
-				Padding(0, 1)
+	queueFocusedBorder = lipgloss.Color("#FA243C")
+	queueBlurredBorder = lipgloss.Color("#333333")
 )
 
 func NewQueuePanel(width, height int) QueuePanel {
@@ -94,7 +87,7 @@ func (q *QueuePanel) SetTracks(tracks []models.QueueTrack) {
 func (q *QueuePanel) SetSize(width, height int) {
 	q.width = width
 	q.height = height
-	q.list.SetSize(width-4, height-2)
+	q.list.SetSize(width-4, height-4)
 }
 
 func (q *QueuePanel) SetFocused(focused bool) {
@@ -108,9 +101,9 @@ func (q *QueuePanel) Update(msg tea.Msg) tea.Cmd {
 }
 
 func (q *QueuePanel) View() string {
-	style := queueBlurredStyle
+	border := queueBlurredBorder
 	if q.focused {
-		style = queueFocusedStyle
+		border = queueFocusedBorder
 	}
-	return style.Width(q.width - 2).Height(q.height - 2).MaxWidth(q.width - 2).MaxHeight(q.height - 2).Render(q.list.View())
+	return renderRectBox(q.list.View(), q.width, q.height, border, lipgloss.Top)
 }

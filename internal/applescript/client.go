@@ -166,7 +166,8 @@ tell application "Music"
 	set trackArtist to artist of t
 	set trackAlbum to album of t
 	set trackDuration to duration of t
-	return trackName & "||" & trackArtist & "||" & trackAlbum & "||" & trackDuration
+	set trackFormat to kind of t
+	return trackName & "||" & trackArtist & "||" & trackAlbum & "||" & trackDuration & "||" & trackFormat
 end tell`
 
 	out, err := run(script)
@@ -175,7 +176,7 @@ end tell`
 	}
 
 	parts := strings.Split(out, "||")
-	if len(parts) < 4 {
+	if len(parts) < 5 {
 		return models.Track{}, fmt.Errorf("unexpected output: %s", out)
 	}
 
@@ -186,6 +187,7 @@ end tell`
 		Artist:   strings.TrimSpace(parts[1]),
 		Album:    strings.TrimSpace(parts[2]),
 		Duration: duration,
+		Format:   strings.TrimSpace(parts[4]),
 	}, nil
 }
 
@@ -388,11 +390,9 @@ tell application "Music"
 		play track %d of playlist "Library"
 	end if
 end tell`, contextType, trackIndex, contextValue, contextType, contextValue, trackIndex, contextType, contextValue, trackIndex, contextType, trackIndex)
-	
+
 	return runSilent(script)
 }
-
-
 
 // PlayTrackByName plays the first track matching name in the library.
 func PlayTrackByName(name string) error {
@@ -499,7 +499,6 @@ end tell`, query)
 	}
 	return tracks, nil
 }
-
 
 // --- Artwork ---
 

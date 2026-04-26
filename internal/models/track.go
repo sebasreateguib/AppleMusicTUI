@@ -24,6 +24,7 @@ type Track struct {
 	Artist   string
 	Album    string
 	Duration float64 // seconds
+	Format   string
 }
 
 // Playlist holds metadata for a playlist.

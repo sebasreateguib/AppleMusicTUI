@@ -4,6 +4,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"SR-Player/internal/applescript"
 	"SR-Player/internal/models"
@@ -34,7 +35,6 @@ type focusedPanel int
 
 const (
 	focusSearchInput focusedPanel = iota
-	focusPlaylists
 	focusCenter
 	focusRight
 )
@@ -47,8 +47,17 @@ const (
 	CenterStringList
 )
 
+type TopTab int
+
+const (
+	TabAlbums TopTab = iota
+	TabArtists
+	TabSongs
+	TabPlaylists
+	TabSearch
+)
+
 type App struct {
-	playlistPanel   panels.PlaylistsPanel
 	trackListPanel  panels.TrackListPanel
 	stringListPanel panels.StringListPanel
 	nowPlayingPanel panels.NowPlayingPanel
@@ -57,50 +66,83 @@ type App struct {
 	statusBar       StatusBar
 	layout          Layout
 
-	nowPlaying           models.NowPlaying
-	lastTrackName        string
-	rightView            RightView
-	centerView           CenterView
-	focus                focusedPanel
-	tick                 int
-	width                int
-	height               int
+	nowPlaying             models.NowPlaying
+	lastTrackName          string
+	rightView              RightView
+	centerView             CenterView
+	focus                  focusedPanel
+	activeTopTab           TopTab
+	playlists              []models.Playlist
+	tick                   int
+	width                  int
+	height                 int
+	centerTracksHeight     int
+	centerVisualizerHeight int
 
-	currentContextType   string
-	currentContextValue  string
-	currentContextTotal  int
-	fetchingTracks       bool
+	currentContextType  string
+	currentContextValue string
+	currentContextTotal int
+	fetchingTracks      bool
 }
 
 func NewApp(width, height int) App {
 	tmpLayout := NewLayout(width, height)
-	leftW, centerW, rightW, mainH := tmpLayout.PanelSizes()
+	centerW, rightW, mainH := tmpLayout.PanelSizes()
+	centerTracksH, centerVisH := splitCenterHeights(mainH)
 
 	app := App{
-		playlistPanel:   panels.NewPlaylistsPanel(leftW, mainH),
-		trackListPanel:  panels.NewTrackListPanel(centerW, mainH),
+		trackListPanel:  panels.NewTrackListPanel(centerW, centerTracksH),
 		stringListPanel: panels.NewStringListPanel(centerW, mainH, "Library"),
-		nowPlayingPanel: panels.NewNowPlayingPanel(rightW, mainH-1),
-		queuePanel:      panels.NewQueuePanel(rightW, mainH-1),
+		nowPlayingPanel: panels.NewNowPlayingPanel(rightW, mainH),
+		queuePanel:      panels.NewQueuePanel(rightW, mainH),
 		searchPanel:     panels.NewSearchPanel(width, mainH),
 		statusBar:       NewStatusBar(width),
 		layout:          tmpLayout,
 		rightView:       ViewNowPlaying,
 		centerView:      CenterContextTracks,
-		focus:           focusPlaylists,
+		focus:           focusCenter,
+		activeTopTab:    TabSongs,
 		width:           width,
 		height:          height,
+
+		centerTracksHeight:     centerTracksH,
+		centerVisualizerHeight: centerVisH,
+		currentContextType:     "library",
+		currentContextValue:    "",
+		currentContextTotal:    999999,
 	}
-	app.playlistPanel.SetFocused(true)
+	app.updateFocusStyles()
 	return app
 }
 
-func (a App) Init() tea.Cmd {
-	return tea.Batch(
-		tickCmd(),
-		fetchNowPlaying(),
-		fetchPlaylists(),
-	)
+func splitCenterHeights(mainH int) (tracksH, visH int) {
+	if mainH <= 11 {
+		return mainH, 0
+	}
+
+	visH = mainH / 3
+	if visH < 6 {
+		visH = 6
+	}
+	if visH > 14 {
+		visH = 14
+	}
+
+	tracksH = mainH - visH
+	if tracksH < 6 {
+		tracksH = 6
+		visH = mainH - tracksH
+	}
+	if visH < 4 {
+		visH = 4
+		tracksH = mainH - visH
+	}
+	if tracksH < 1 {
+		tracksH = mainH
+		visH = 0
+	}
+
+	return
 }
 
 func tickCmd() tea.Cmd {
@@ -149,7 +191,6 @@ func fetchUniqueStrings(kind string) tea.Cmd {
 	}
 }
 
-// limit reduced to 30 as requested
 func fetchContextTracks(cType, cVal string, offset, limit int) tea.Cmd {
 	return func() tea.Msg {
 		tracks, _ := applescript.GetFilteredTracks(cType, cVal, offset, limit)
@@ -236,22 +277,157 @@ func doPlayTrack(name string) tea.Cmd {
 	}
 }
 
+func (a App) Init() tea.Cmd {
+	return tea.Batch(
+		tickCmd(),
+		fetchNowPlaying(),
+		fetchPlaylists(),
+		fetchContextTracks("library", "", 0, 30),
+	)
+}
+
+func (a *App) topTabFromKey(key string) (TopTab, bool) {
+	switch key {
+	case "1":
+		return TabAlbums, true
+	case "2":
+		return TabArtists, true
+	case "3":
+		return TabSongs, true
+	case "4":
+		return TabPlaylists, true
+	case "5":
+		return TabSearch, true
+	default:
+		return TabSongs, false
+	}
+}
+
+func (a *App) playlistsAsStrings() []string {
+	items := make([]string, 0, len(a.playlists))
+	for _, pl := range a.playlists {
+		if pl.Name != "" {
+			items = append(items, pl.Name)
+		}
+	}
+	return items
+}
+
+func (a *App) refreshPlaylistList() {
+	items := a.playlistsAsStrings()
+	if len(items) == 0 {
+		a.stringListPanel.SetItems([]string{"No playlists"}, "Playlists")
+		return
+	}
+	a.stringListPanel.SetItems(items, "Playlists")
+}
+
+func (a *App) switchTopTab(tab TopTab) []tea.Cmd {
+	a.activeTopTab = tab
+
+	if a.focus == focusSearchInput && tab != TabSearch {
+		a.focus = focusCenter
+	}
+
+	var cmds []tea.Cmd
+	switch tab {
+	case TabAlbums:
+		a.centerView = CenterStringList
+		a.currentContextType = ""
+		a.currentContextValue = ""
+		a.stringListPanel.SetItems([]string{"Loading..."}, "Albums")
+		cmds = append(cmds, fetchUniqueStrings("albums"))
+
+	case TabArtists:
+		a.centerView = CenterStringList
+		a.currentContextType = ""
+		a.currentContextValue = ""
+		a.stringListPanel.SetItems([]string{"Loading..."}, "Artists")
+		cmds = append(cmds, fetchUniqueStrings("artists"))
+
+	case TabSongs:
+		a.centerView = CenterContextTracks
+		a.currentContextType = "library"
+		a.currentContextValue = ""
+		a.currentContextTotal = 999999
+		a.fetchingTracks = true
+		a.trackListPanel.SetTracks("Songs", []models.Track{}, a.nowPlaying.Track.Name)
+		cmds = append(cmds, fetchContextTracks("library", "", 0, 30))
+
+	case TabPlaylists:
+		a.centerView = CenterStringList
+		a.currentContextType = ""
+		a.currentContextValue = ""
+		if len(a.playlists) == 0 {
+			a.stringListPanel.SetItems([]string{"Loading..."}, "Playlists")
+			cmds = append(cmds, fetchPlaylists())
+		} else {
+			a.refreshPlaylistList()
+		}
+
+	case TabSearch:
+		a.centerView = CenterSearchResults
+		a.focus = focusSearchInput
+	}
+
+	a.updateFocusStyles()
+	return cmds
+}
+
+func nextTopTab(tab TopTab) TopTab {
+	return TopTab((int(tab) + 1) % 5)
+}
+
+func prevTopTab(tab TopTab) TopTab {
+	return TopTab((int(tab) + 4) % 5)
+}
+
+func (a *App) openTracksForSelectedString() []tea.Cmd {
+	selectedStr := a.stringListPanel.SelectedItem()
+	if selectedStr == "" || selectedStr == "Loading..." || selectedStr == "No playlists" {
+		return nil
+	}
+
+	cType := ""
+	switch a.activeTopTab {
+	case TabArtists:
+		cType = "artist"
+	case TabAlbums:
+		cType = "album"
+	case TabPlaylists:
+		cType = "playlist"
+	default:
+		return nil
+	}
+
+	a.centerView = CenterContextTracks
+	a.currentContextType = cType
+	a.currentContextValue = selectedStr
+	a.currentContextTotal = 999999
+	a.fetchingTracks = true
+	a.trackListPanel.SetTracks("Loading...", []models.Track{}, "")
+	a.updateFocusStyles()
+
+	return []tea.Cmd{fetchContextTracks(cType, selectedStr, 0, 30)}
+}
+
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
-
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
 		a.layout.SetSize(msg.Width, msg.Height)
 
-		leftW, centerW, rightW, mainH := a.layout.PanelSizes()
-		a.playlistPanel.SetSize(leftW, mainH)
-		a.trackListPanel.SetSize(centerW, mainH)
+		centerW, rightW, mainH := a.layout.PanelSizes()
+		centerTracksH, centerVisH := splitCenterHeights(mainH)
+		a.centerTracksHeight = centerTracksH
+		a.centerVisualizerHeight = centerVisH
+		a.trackListPanel.SetSize(centerW, centerTracksH)
 		a.stringListPanel.SetSize(centerW, mainH)
-		a.nowPlayingPanel.SetSize(rightW, mainH-1)
-		a.queuePanel.SetSize(rightW, mainH-1)
+		a.nowPlayingPanel.SetSize(rightW, mainH)
+		a.queuePanel.SetSize(rightW, mainH)
 		a.statusBar.SetWidth(msg.Width)
 
 	case tickMsg:
@@ -287,7 +463,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.nowPlayingPanel.SetNowPlaying(a.nowPlaying)
 
 	case playlistsMsg:
-		a.playlistPanel.SetPlaylists([]models.Playlist(msg))
+		a.playlists = []models.Playlist(msg)
+		if a.activeTopTab == TabPlaylists && a.centerView == CenterStringList {
+			a.refreshPlaylistList()
+		}
 
 	case uniqueStringsMsg:
 		title := "Artists"
@@ -321,15 +500,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.focus == focusSearchInput {
 			switch msg.String() {
 			case "esc":
-				a.focus = focusPlaylists
-				a.searchPanel.SetFocused(false)
+				a.focus = focusCenter
 				a.updateFocusStyles()
 			case "enter":
 				query := a.searchPanel.GetQuery()
 				if query != "" {
+					a.activeTopTab = TabSearch
 					a.centerView = CenterSearchResults
 					a.focus = focusCenter
-					a.searchPanel.SetFocused(false)
 					a.updateFocusStyles()
 					cmds = append(cmds, searchLibrary(query))
 				}
@@ -341,26 +519,36 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			break
 		}
 
+		if tab, ok := a.topTabFromKey(msg.String()); ok {
+			cmds = append(cmds, a.switchTopTab(tab)...)
+			return a, tea.Batch(cmds...)
+		}
+
 		switch msg.String() {
-		case "Q":
+		case "q", "Q":
 			return a, tea.Quit
 
 		case "/":
-			if a.focus != focusSearchInput {
-				a.focus = focusSearchInput
-				a.searchPanel.SetFocused(true)
-				a.updateFocusStyles()
-				return a, nil
-			}
+			a.activeTopTab = TabSearch
+			a.centerView = CenterSearchResults
+			a.focus = focusSearchInput
+			a.updateFocusStyles()
+			return a, nil
 
-		case "1":
+		case "z":
 			a.rightView = ViewNowPlaying
 			a.updateFocusStyles()
 
-		case "2":
+		case "x":
 			a.rightView = ViewQueue
 			a.updateFocusStyles()
 			cmds = append(cmds, fetchQueue())
+
+		case "[":
+			cmds = append(cmds, a.switchTopTab(prevTopTab(a.activeTopTab))...)
+
+		case "]":
+			cmds = append(cmds, a.switchTopTab(nextTopTab(a.activeTopTab))...)
 
 		case " ":
 			cmds = append(cmds, doPlayPause())
@@ -378,18 +566,18 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, doToggleRepeat())
 
 		case "left":
-			if a.focus == focusCenter {
-				a.focus = focusPlaylists
-				a.updateFocusStyles()
-			} else if a.focus == focusRight {
+			if a.focus == focusRight {
 				a.focus = focusCenter
+				a.updateFocusStyles()
+			} else if a.focus == focusCenter {
+				a.focus = focusSearchInput
 				a.updateFocusStyles()
 			} else {
 				cmds = append(cmds, doSeek(-10, a.nowPlaying.Position))
 			}
 
 		case "right":
-			if a.focus == focusPlaylists {
+			if a.focus == focusSearchInput {
 				a.focus = focusCenter
 				a.updateFocusStyles()
 			} else if a.focus == focusCenter {
@@ -402,59 +590,26 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			switch a.focus {
 			case focusSearchInput:
-				a.searchPanel.SetFocused(false)
-				a.focus = focusPlaylists
-			case focusPlaylists:
 				a.focus = focusCenter
 			case focusCenter:
 				a.focus = focusRight
 			case focusRight:
 				a.focus = focusSearchInput
-				a.searchPanel.SetFocused(true)
 			}
 			a.updateFocusStyles()
 
 		case "esc":
-			if a.focus == focusRight || a.focus == focusCenter {
-				a.focus = focusPlaylists
+			if a.focus == focusRight {
+				a.focus = focusCenter
+				a.updateFocusStyles()
+			} else if a.focus == focusCenter && a.centerView == CenterContextTracks {
+				if a.activeTopTab == TabArtists || a.activeTopTab == TabAlbums || a.activeTopTab == TabPlaylists {
+					cmds = append(cmds, a.switchTopTab(a.activeTopTab)...)
+				}
 			}
-			a.updateFocusStyles()
 
 		case "enter":
-			switch a.focus {
-			case focusPlaylists:
-				item := a.playlistPanel.SelectedItem()
-				if item != nil && item.Kind != "separator" {
-					a.focus = focusCenter
-					
-					if item.Kind == "artists" || item.Kind == "albums" {
-						a.centerView = CenterStringList
-						a.stringListPanel.SetItems([]string{"Loading..."}, item.TitleStr)
-						cmds = append(cmds, fetchUniqueStrings(item.Kind))
-					} else {
-						a.centerView = CenterContextTracks
-						
-						cType := "playlist"
-						cVal := item.Value
-						if item.Kind == "songs" {
-							cType = "library"
-							cVal = ""
-						}
-
-						a.currentContextType = cType
-						a.currentContextValue = cVal
-						// Arbitrary large value for library limit
-						a.currentContextTotal = 999999 
-						a.fetchingTracks = true
-						a.trackListPanel.SetTracks("Loading...", []models.Track{}, "")
-						
-						// Limit pagination to 30 items
-						cmds = append(cmds, fetchContextTracks(cType, cVal, 0, 30))
-					}
-					a.updateFocusStyles()
-				}
-
-			case focusCenter:
+			if a.focus == focusCenter {
 				if a.centerView == CenterContextTracks {
 					idx := a.trackListPanel.SelectedTrackIndex()
 					if idx > 0 && a.currentContextType != "" {
@@ -468,33 +623,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						a.updateFocusStyles()
 					}
 				} else if a.centerView == CenterStringList {
-					// We selected an artist or an album
-					selectedStr := a.stringListPanel.SelectedItem()
-					if selectedStr != "" && selectedStr != "Loading..." {
-						cType := "artist"
-						if a.playlistPanel.SelectedItem().Kind == "albums" {
-							cType = "album"
-						}
-						
-						a.centerView = CenterContextTracks
-						a.currentContextType = cType
-						a.currentContextValue = selectedStr
-						a.currentContextTotal = 999999
-						a.fetchingTracks = true
-						a.trackListPanel.SetTracks("Loading...", []models.Track{}, "")
-						
-						// Fetch 30 items limit
-						cmds = append(cmds, fetchContextTracks(cType, selectedStr, 0, 30))
-						a.updateFocusStyles()
-					}
+					cmds = append(cmds, a.openTracksForSelectedString()...)
 				}
 			}
 
 		default:
 			switch a.focus {
-			case focusPlaylists:
-				cmd := a.playlistPanel.Update(msg)
-				cmds = append(cmds, cmd)
 			case focusCenter:
 				if a.centerView == CenterContextTracks {
 					cmd := a.trackListPanel.Update(msg)
@@ -502,7 +636,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					idx := a.trackListPanel.SelectedTrackIndex()
 					loaded := len(a.trackListPanel.GetTracks())
-					// Pagination boundary hit? load next 30
 					if idx >= loaded-10 && loaded < a.currentContextTotal && !a.fetchingTracks {
 						a.fetchingTracks = true
 						cmds = append(cmds, fetchContextTracks(a.currentContextType, a.currentContextValue, loaded, 30))
@@ -515,8 +648,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, cmd)
 				}
 			case focusRight:
-				switch a.rightView {
-				case ViewQueue:
+				if a.rightView == ViewQueue {
 					cmd := a.queuePanel.Update(msg)
 					cmds = append(cmds, cmd)
 				}
@@ -528,11 +660,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) updateFocusStyles() {
-	a.playlistPanel.SetFocused(a.focus == focusPlaylists)
-	
+	a.searchPanel.SetFocused(a.focus == focusSearchInput)
 	a.trackListPanel.SetFocused(a.focus == focusCenter && a.centerView == CenterContextTracks)
 	a.stringListPanel.SetFocused(a.focus == focusCenter && a.centerView == CenterStringList)
-
 	a.nowPlayingPanel.SetFocused(a.focus == focusRight && a.rightView == ViewNowPlaying)
 	a.queuePanel.SetFocused(a.focus == focusRight && a.rightView == ViewQueue)
 }
@@ -542,25 +672,38 @@ func (a App) View() string {
 		return "Loading..."
 	}
 
-	topView := a.searchPanel.ViewInput(a.width, a.focus == focusSearchInput)
-	leftView := a.playlistPanel.View()
+	topView := renderTopBar(a.width, a.activeTopTab)
 
-	_, centerW, _, mainH := a.layout.PanelSizes()
+	centerW, _, mainH := a.layout.PanelSizes()
 
 	var centerView string
 	if a.centerView == CenterContextTracks {
 		centerView = a.trackListPanel.View()
+		if a.centerVisualizerHeight > 0 {
+			visView := panels.RenderVisualizerPanel(
+				centerW,
+				a.centerVisualizerHeight,
+				a.tick,
+				a.nowPlaying.State == models.StatePlaying,
+				a.focus == focusCenter,
+			)
+			centerView = lipgloss.JoinVertical(lipgloss.Left, centerView, visView)
+		}
 	} else if a.centerView == CenterStringList {
 		centerView = a.stringListPanel.View()
 	} else {
-		centerView = a.searchPanel.ViewResults(centerW, mainH, a.focus == focusCenter)
+		inputH := 3
+		resultsH := mainH - inputH
+		if resultsH < 6 {
+			resultsH = 6
+		}
+		searchInput := a.searchPanel.ViewInput(centerW, a.focus == focusSearchInput)
+		searchResults := a.searchPanel.ViewResults(centerW, resultsH, a.focus == focusCenter)
+		centerView = lipgloss.JoinVertical(lipgloss.Left, searchInput, searchResults)
 	}
 
-	var rightView string
-	switch a.rightView {
-	case ViewNowPlaying:
-		rightView = a.nowPlayingPanel.View(a.tick)
-	case ViewQueue:
+	rightView := a.nowPlayingPanel.View(a.tick)
+	if a.rightView == ViewQueue {
 		rightView = a.queuePanel.View()
 	}
 
@@ -568,10 +711,8 @@ func (a App) View() string {
 
 	return a.layout.Render(
 		topView,
-		leftView,
 		centerView,
 		rightView,
 		statusView,
-		a.rightView,
 	)
 }

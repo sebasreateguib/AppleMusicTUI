@@ -16,19 +16,6 @@ type Layout struct {
 	height int
 }
 
-var (
-	tabActiveStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FA243C")).
-			Bold(true).
-			Padding(0, 1).
-			Border(lipgloss.NormalBorder(), false, false, true, false).
-			BorderForeground(lipgloss.Color("#FA243C"))
-
-	tabInactiveStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#555555")).
-				Padding(0, 1)
-)
-
 func NewLayout(width, height int) Layout {
 	return Layout{width: width, height: height}
 }
@@ -38,50 +25,56 @@ func (l *Layout) SetSize(width, height int) {
 	l.height = height
 }
 
-func (l *Layout) PanelSizes() (leftW, centerW, rightW, mainH int) {
+func (l *Layout) PanelSizes() (centerW, rightW, mainH int) {
 	statusH := 2
-	topH := 3 // Box length of search input
+	topH := 4
 	mainH = l.height - statusH - topH
 	if mainH < 5 {
 		mainH = 5
 	}
 
-	leftW = 28
-
-	rightW = 38
-	if rightW > l.width/3 {
-		rightW = l.width / 3
+	rightW = 58
+	maxRight := (l.width * 46) / 100
+	if rightW > maxRight {
+		rightW = maxRight
 	}
 	if rightW < 36 {
 		rightW = 36
 	}
 
-	centerW = l.width - leftW - rightW
-	if centerW < 20 {
-		centerW = 20
+	centerW = l.width - rightW
+	if centerW < 24 {
+		centerW = 24
 	}
 	return
 }
 
 func (l *Layout) Render(
 	topView string,
-	playlistView string,
 	centerContentView string,
 	rightContentView string,
 	statusView string,
-	activeRightTab RightView,
 ) string {
-	leftW, centerW, rightW, mainH := l.PanelSizes()
+	centerW, rightW, mainH := l.PanelSizes()
 
-	tabBar := renderTabBar(activeRightTab, rightW)
+	centerCol := lipgloss.NewStyle().
+		Width(centerW).
+		Height(mainH).
+		MaxWidth(centerW).
+		MaxHeight(mainH).
+		Render(centerContentView)
 
-	rightPanel := lipgloss.JoinVertical(lipgloss.Left, tabBar, rightContentView)
+	rightCol := lipgloss.NewStyle().
+		Width(rightW).
+		Height(mainH).
+		MaxWidth(rightW).
+		MaxHeight(mainH).
+		Render(rightContentView)
 
 	mainRow := lipgloss.JoinHorizontal(
 		lipgloss.Top,
-		lipgloss.NewStyle().Width(leftW).MaxHeight(mainH).Render(playlistView),
-		lipgloss.NewStyle().Width(centerW).MaxHeight(mainH).Render(centerContentView),
-		lipgloss.NewStyle().Width(rightW).MaxHeight(mainH).Render(rightPanel),
+		centerCol,
+		rightCol,
 	)
 
 	return lipgloss.JoinVertical(
@@ -90,29 +83,4 @@ func (l *Layout) Render(
 		mainRow,
 		statusView,
 	)
-}
-
-func renderTabBar(active RightView, width int) string {
-	tabs := []struct {
-		label string
-		view  RightView
-		key   string
-	}{
-		{"Now Playing", ViewNowPlaying, "1"},
-		{"Queue", ViewQueue, "2"},
-	}
-
-	var rendered []string
-	for _, tab := range tabs {
-		label := tab.label + " [" + tab.key + "]"
-		if tab.view == active {
-			rendered = append(rendered, tabActiveStyle.Render(label))
-		} else {
-			rendered = append(rendered, tabInactiveStyle.Render(label))
-		}
-	}
-
-	bar := lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
-	return lipgloss.NewStyle().Width(width).MaxWidth(width).
-		Render(bar)
 }

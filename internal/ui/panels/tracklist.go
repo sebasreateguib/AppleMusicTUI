@@ -37,7 +37,7 @@ func (t trackListItem) Title() string {
 	title := padTruncate(t.track.Name, 35)
 	artist := padTruncate(t.track.Artist, 25)
 	dur := formatTrackDuration(t.track.Duration)
-	
+
 	// Single line format for the table row
 	return fmt.Sprintf("%s%s  %s %s [%s]", prefix, idx, title, artist, dur)
 }
@@ -68,15 +68,8 @@ type TrackListPanel struct {
 }
 
 var (
-	trackListFocusedStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#FA243C")).
-				Padding(0, 1)
-
-	trackListBlurredStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("#333333")).
-				Padding(0, 1)
+	trackListFocusedBorder = lipgloss.Color("#FA243C")
+	trackListBlurredBorder = lipgloss.Color("#333333")
 )
 
 func NewTrackListPanel(width, height int) TrackListPanel {
@@ -84,10 +77,10 @@ func NewTrackListPanel(width, height int) TrackListPanel {
 	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
 		Foreground(lipgloss.Color("#e1ca72")).
 		BorderLeftForeground(lipgloss.Color("#e1ca72"))
-	
+
 	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.
 		Foreground(lipgloss.Color("#CCCCCC"))
-	
+
 	// Disable description styling since we don't use it anymore
 	delegate.ShowDescription = false
 
@@ -162,8 +155,7 @@ func (t *TrackListPanel) rebuildItems() {
 func (t *TrackListPanel) SetSize(width, height int) {
 	t.width = width
 	t.height = height
-	// internal list height minus 2 padding lines (0 top, 0 bot, but list counts its borders if any)
-	t.list.SetSize(width-4, height-2)
+	t.list.SetSize(width-4, height-4)
 }
 
 func (t *TrackListPanel) SetFocused(focused bool) {
@@ -197,10 +189,9 @@ func (t *TrackListPanel) Update(msg tea.Msg) tea.Cmd {
 }
 
 func (t *TrackListPanel) View() string {
-	style := trackListBlurredStyle
+	border := trackListBlurredBorder
 	if t.focused {
-		style = trackListFocusedStyle
+		border = trackListFocusedBorder
 	}
-	// Add MaxHeight to absolutely prevent layout shifting bugs
-	return style.Width(t.width - 2).Height(t.height - 2).MaxWidth(t.width - 2).MaxHeight(t.height - 2).Render(t.list.View())
+	return renderRectBox(t.list.View(), t.width, t.height, border, lipgloss.Top)
 }

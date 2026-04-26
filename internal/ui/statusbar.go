@@ -82,7 +82,7 @@ func (s *StatusBar) View(np models.NowPlaying) string {
 
 	controlsLen := lipgloss.Width(controls)
 	flagLen := lipgloss.Width(flagControls)
-	timeLen := len(elapsedStr) + len(totalStr) + 3 
+	timeLen := len(elapsedStr) + len(totalStr) + 3
 	padding := 4
 
 	barWidth := s.width - controlsLen - flagLen - timeLen - padding
@@ -105,7 +105,7 @@ func (s *StatusBar) View(np models.NowPlaying) string {
 
 	keyhints := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#444444")).
-		Render("  [space] play/pause  [n/p] next/prev  [s] shuffle  [r] repeat  [←/→] seek  [q] quit")
+		Render("  [1-5] tabs  [/] search  [space] play/pause  [n/p] next/prev  [s] shuffle  [r] repeat  [←/→] seek  [q] quit")
 
 	full := lipgloss.JoinVertical(lipgloss.Left,
 		row,
