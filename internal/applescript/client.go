@@ -12,6 +12,11 @@ import (
 	"SR-Player/internal/models"
 )
 
+func escapeAppleScriptString(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	return strings.ReplaceAll(s, `"`, `\"`)
+}
+
 // run executes an AppleScript string and returns the trimmed output.
 func run(script string) (string, error) {
 	cmd := exec.Command("osascript", "-e", script)
@@ -255,7 +260,7 @@ end tell`
 }
 
 func PlayPlaylist(name string) error {
-	script := fmt.Sprintf(`tell application "Music" to play playlist "%s"`, name)
+	script := fmt.Sprintf(`tell application "Music" to play playlist "%s"`, escapeAppleScriptString(name))
 	return runSilent(script)
 }
 
@@ -316,6 +321,8 @@ end tell`
 func GetFilteredTracks(contextType, contextValue string, offset, limit int) ([]models.Track, error) {
 	startIdx := offset + 1
 	endIdx := offset + limit
+	escapedType := escapeAppleScriptString(contextType)
+	escapedValue := escapeAppleScriptString(contextValue)
 
 	script := fmt.Sprintf(`
 tell application "Music"
@@ -346,7 +353,7 @@ tell application "Music"
 		set output to output & tName & "||" & tArtist & "||" & tAlbum & "||" & tDuration & "\n"
 	end repeat
 	return output
-end tell`, contextType, contextValue, contextType, contextValue, contextType, contextValue, contextType, startIdx, endIdx)
+end tell`, escapedType, escapedValue, escapedType, escapedValue, escapedType, escapedValue, escapedType, startIdx, endIdx)
 
 	out, err := run(script)
 	if err != nil || out == "" {
@@ -376,10 +383,15 @@ end tell`, contextType, contextValue, contextType, contextValue, contextType, co
 }
 
 func PlayTrackInContext(contextType, contextValue string, trackIndex int) error {
+	escapedType := escapeAppleScriptString(contextType)
+	escapedValue := escapeAppleScriptString(contextValue)
 	script := fmt.Sprintf(`
 tell application "Music"
 	if "%s" is "playlist" then
-		play track %d of playlist "%s"
+		set thePlaylist to playlist "%s"
+		play thePlaylist
+		delay 0.1
+		play track %d of thePlaylist
 	else if "%s" is "artist" then
 		set tList to (tracks of playlist "Library" whose artist is "%s")
 		play item %d of tList
@@ -387,17 +399,87 @@ tell application "Music"
 		set tList to (tracks of playlist "Library" whose album is "%s")
 		play item %d of tList
 	else if "%s" is "library" then
-		play track %d of playlist "Library"
+		set theLibrary to playlist "Library"
+		play theLibrary
+		delay 0.1
+		play track %d of theLibrary
 	end if
-end tell`, contextType, trackIndex, contextValue, contextType, contextValue, trackIndex, contextType, contextValue, trackIndex, contextType, trackIndex)
+end tell`, escapedType, escapedValue, trackIndex, escapedType, escapedValue, trackIndex, escapedType, escapedValue, trackIndex, escapedType, trackIndex)
 
 	return runSilent(script)
 }
 
 // PlayTrackByName plays the first track matching name in the library.
 func PlayTrackByName(name string) error {
-	script := fmt.Sprintf(`tell application "Music" to play track "%s"`, name)
+	script := fmt.Sprintf(`tell application "Music" to play track "%s"`, escapeAppleScriptString(name))
 	return runSilent(script)
+}
+
+// PlayTrackInLibrary plays an exact track match from the library.
+func PlayTrackInLibrary(track models.Track) error {
+	script := fmt.Sprintf(`
+tell application "Music"
+	set tList to (tracks of playlist "Library" whose name is "%s" and artist is "%s" and album is "%s")
+	if (count of tList) is 0 then error "TRACK_NOT_FOUND"
+	play item 1 of tList
+end tell`,
+		escapeAppleScriptString(track.Name),
+		escapeAppleScriptString(track.Artist),
+		escapeAppleScriptString(track.Album),
+	)
+
+	return runSilent(script)
+}
+
+// FindTrackIndexInContext returns the 1-based index of the exact track inside the given context.
+func FindTrackIndexInContext(contextType, contextValue string, track models.Track) (int, error) {
+	escapedType := escapeAppleScriptString(contextType)
+	escapedValue := escapeAppleScriptString(contextValue)
+	script := fmt.Sprintf(`
+tell application "Music"
+	if "%s" is "playlist" then
+		set trackList to (tracks of playlist "%s")
+	else if "%s" is "artist" then
+		set trackList to (tracks of playlist "Library" whose artist is "%s")
+	else if "%s" is "album" then
+		set trackList to (tracks of playlist "Library" whose album is "%s")
+	else if "%s" is "library" then
+		set trackList to tracks of playlist "Library"
+	else
+		return ""
+	end if
+	
+	repeat with i from 1 to (count of trackList)
+		set t to item i of trackList
+		if (name of t is "%s") and (artist of t is "%s") and (album of t is "%s") then
+			return i as string
+		end if
+	end repeat
+	
+	return ""
+end tell`,
+		escapedType,
+		escapedValue,
+		escapedType,
+		escapedValue,
+		escapedType,
+		escapedValue,
+		escapedType,
+		escapeAppleScriptString(track.Name),
+		escapeAppleScriptString(track.Artist),
+		escapeAppleScriptString(track.Album),
+	)
+
+	out, err := run(script)
+	if err != nil || out == "" {
+		return 0, err
+	}
+
+	idx, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, err
+	}
+	return idx, nil
 }
 
 // --- Queue (current playlist tracks) ---
@@ -459,9 +541,95 @@ end tell`
 	return tracks, nil
 }
 
+// GetQueueTracksForContext returns the current and upcoming tracks for a known playback context.
+func GetQueueTracksForContext(contextType, contextValue string, currentIndex, ahead int) ([]models.QueueTrack, error) {
+	if currentIndex < 1 {
+		return nil, nil
+	}
+	if ahead < 0 {
+		ahead = 0
+	}
+
+	escapedType := escapeAppleScriptString(contextType)
+	escapedValue := escapeAppleScriptString(contextValue)
+	script := fmt.Sprintf(`
+tell application "Music"
+	if "%s" is "playlist" then
+		set trackList to (tracks of playlist "%s")
+	else if "%s" is "artist" then
+		set trackList to (tracks of playlist "Library" whose artist is "%s")
+	else if "%s" is "album" then
+		set trackList to (tracks of playlist "Library" whose album is "%s")
+	else if "%s" is "library" then
+		set trackList to tracks of playlist "Library"
+	else
+		return ""
+	end if
+	
+	set total to count of trackList
+	if %d > total then return ""
+	
+	set maxIdx to %d + %d
+	if maxIdx > total then set maxIdx to total
+	
+	set output to ""
+	repeat with i from %d to maxIdx
+		set tr to item i of trackList
+		set tName to name of tr
+		set tArtist to artist of tr
+		set isCurrent to "0"
+		if i is %d then set isCurrent to "1"
+		set output to output & i & "||" & tName & "||" & tArtist & "||" & isCurrent & "\n"
+	end repeat
+	return output
+end tell`,
+		escapedType,
+		escapedValue,
+		escapedType,
+		escapedValue,
+		escapedType,
+		escapedValue,
+		escapedType,
+		currentIndex,
+		currentIndex,
+		ahead,
+		currentIndex,
+		currentIndex,
+	)
+
+	out, err := run(script)
+	if err != nil || out == "" {
+		return nil, err
+	}
+
+	var tracks []models.QueueTrack
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "||", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		idx, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
+		tracks = append(tracks, models.QueueTrack{
+			Index: idx,
+			Track: models.Track{
+				Name:   strings.TrimSpace(parts[1]),
+				Artist: strings.TrimSpace(parts[2]),
+			},
+			IsCurrent: strings.TrimSpace(parts[3]) == "1",
+		})
+	}
+	return tracks, nil
+}
+
 // --- Search ---
 
 func SearchLibrary(query string) ([]models.Track, error) {
+	escapedQuery := escapeAppleScriptString(query)
 	script := fmt.Sprintf(`
 tell application "Music"
 	set results to search playlist "Library" for "%s"
@@ -473,7 +641,7 @@ tell application "Music"
 		if i >= 30 then exit repeat
 	end repeat
 	return output
-end tell`, query)
+end tell`, escapedQuery)
 
 	out, err := run(script)
 	if err != nil || out == "" {

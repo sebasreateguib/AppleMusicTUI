@@ -28,6 +28,12 @@ type uniqueStringsMsg struct {
 	items []string
 }
 
+type playbackIndexMsg struct {
+	contextType  string
+	contextValue string
+	index        int
+}
+
 type queueMsg []models.QueueTrack
 type searchResultsMsg []models.Track
 
@@ -83,6 +89,10 @@ type App struct {
 	currentContextValue string
 	currentContextTotal int
 	fetchingTracks      bool
+
+	playbackContextType  string
+	playbackContextValue string
+	playbackTrackIndex   int
 }
 
 func NewApp(width, height int) App {
@@ -179,6 +189,13 @@ func fetchQueue() tea.Cmd {
 	}
 }
 
+func fetchContextQueue(cType, cVal string, currentIndex int) tea.Cmd {
+	return func() tea.Msg {
+		tracks, _ := applescript.GetQueueTracksForContext(cType, cVal, currentIndex, 10)
+		return queueMsg(tracks)
+	}
+}
+
 func fetchUniqueStrings(kind string) tea.Cmd {
 	return func() tea.Msg {
 		var items []string
@@ -202,6 +219,17 @@ func searchLibrary(query string) tea.Cmd {
 	return func() tea.Msg {
 		results, _ := applescript.SearchLibrary(query)
 		return searchResultsMsg(results)
+	}
+}
+
+func fetchPlaybackIndex(cType, cVal string, track models.Track) tea.Cmd {
+	return func() tea.Msg {
+		idx, _ := applescript.FindTrackIndexInContext(cType, cVal, track)
+		return playbackIndexMsg{
+			contextType:  cType,
+			contextValue: cVal,
+			index:        idx,
+		}
 	}
 }
 
@@ -277,6 +305,15 @@ func doPlayTrack(name string) tea.Cmd {
 	}
 }
 
+func doPlayLibraryTrack(track models.Track) tea.Cmd {
+	return func() tea.Msg {
+		_ = applescript.PlayTrackInLibrary(track)
+		time.Sleep(300 * time.Millisecond)
+		np, _ := applescript.GetNowPlaying()
+		return nowPlayingMsg(np)
+	}
+}
+
 func (a App) Init() tea.Cmd {
 	return tea.Batch(
 		tickCmd(),
@@ -320,6 +357,41 @@ func (a *App) refreshPlaylistList() {
 		return
 	}
 	a.stringListPanel.SetItems(items, "Playlists")
+}
+
+func (a *App) setPlaybackContext(contextType, contextValue string, index int) {
+	a.playbackContextType = contextType
+	a.playbackContextValue = contextValue
+	a.playbackTrackIndex = index
+}
+
+func (a App) hasContextualPlayback() bool {
+	return a.playbackContextType != "" && a.playbackTrackIndex > 0
+}
+
+func (a App) queueFetchCmd() tea.Cmd {
+	if a.hasContextualPlayback() {
+		return fetchContextQueue(a.playbackContextType, a.playbackContextValue, a.playbackTrackIndex)
+	}
+	return fetchQueue()
+}
+
+func (a App) nextCmd() tea.Cmd {
+	if a.hasContextualPlayback() {
+		return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, a.playbackTrackIndex+1)
+	}
+	return doNext()
+}
+
+func (a App) prevCmd() tea.Cmd {
+	if a.hasContextualPlayback() {
+		targetIndex := a.playbackTrackIndex - 1
+		if targetIndex < 1 {
+			targetIndex = 1
+		}
+		return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, targetIndex)
+	}
+	return doPrev()
 }
 
 func (a *App) switchTopTab(tab TopTab) []tea.Cmd {
@@ -437,7 +509,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.tick%6 == 0 {
 			cmds = append(cmds, fetchNowPlaying())
 			if a.rightView == ViewQueue {
-				cmds = append(cmds, fetchQueue())
+				cmds = append(cmds, a.queueFetchCmd())
 			}
 		}
 
@@ -446,6 +518,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case nowPlayingMsg:
+		prevTrack := a.nowPlaying.Track
 		fresh := models.NowPlaying(msg)
 		fresh.ArtworkPath = a.nowPlaying.ArtworkPath
 		a.nowPlaying = fresh
@@ -456,6 +529,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.nowPlaying.ArtworkPath = ""
 			a.nowPlayingPanel.SetNowPlaying(a.nowPlaying)
 			cmds = append(cmds, fetchArtwork())
+		}
+
+		if a.playbackContextType != "" &&
+			(a.nowPlaying.Track.Name != prevTrack.Name ||
+				a.nowPlaying.Track.Artist != prevTrack.Artist ||
+				a.nowPlaying.Track.Album != prevTrack.Album) &&
+			a.nowPlaying.Track.Name != "" {
+			cmds = append(cmds, fetchPlaybackIndex(a.playbackContextType, a.playbackContextValue, a.nowPlaying.Track))
 		}
 
 	case artworkMsg:
@@ -474,6 +555,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			title = "Albums"
 		}
 		a.stringListPanel.SetItems(msg.items, title)
+
+	case playbackIndexMsg:
+		if msg.contextType == a.playbackContextType && msg.contextValue == a.playbackContextValue {
+			a.playbackTrackIndex = msg.index
+			if a.rightView == ViewQueue {
+				cmds = append(cmds, a.queueFetchCmd())
+			}
+		}
 
 	case contextTracksMsg:
 		a.fetchingTracks = false
@@ -542,7 +631,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "x":
 			a.rightView = ViewQueue
 			a.updateFocusStyles()
-			cmds = append(cmds, fetchQueue())
+			cmds = append(cmds, a.queueFetchCmd())
 
 		case "[":
 			cmds = append(cmds, a.switchTopTab(prevTopTab(a.activeTopTab))...)
@@ -554,10 +643,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, doPlayPause())
 
 		case "n":
-			cmds = append(cmds, doNext())
+			cmds = append(cmds, a.nextCmd())
 
 		case "p":
-			cmds = append(cmds, doPrev())
+			cmds = append(cmds, a.prevCmd())
 
 		case "s":
 			cmds = append(cmds, doToggleShuffle())
@@ -613,12 +702,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if a.centerView == CenterContextTracks {
 					idx := a.trackListPanel.SelectedTrackIndex()
 					if idx > 0 && a.currentContextType != "" {
+						a.setPlaybackContext(a.currentContextType, a.currentContextValue, idx)
 						cmds = append(cmds, doPlayTrackInContext(a.currentContextType, a.currentContextValue, idx))
 					}
 				} else if a.centerView == CenterSearchResults {
 					track := a.searchPanel.SelectedTrack()
 					if track != nil {
-						cmds = append(cmds, doPlayTrack(track.Name))
+						a.setPlaybackContext("library", "", 0)
+						cmds = append(cmds, doPlayLibraryTrack(*track))
+						cmds = append(cmds, fetchPlaybackIndex("library", "", *track))
 						a.rightView = ViewNowPlaying
 						a.updateFocusStyles()
 					}
