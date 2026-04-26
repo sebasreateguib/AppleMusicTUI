@@ -16,7 +16,7 @@ type StatusBar struct {
 
 var (
 	statusBarStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("#111111")).
+			Background(lipgloss.Color("#0C0E10")).
 			Foreground(lipgloss.Color("#CCCCCC")).
 			Padding(0, 2)
 
@@ -34,7 +34,14 @@ var (
 				Foreground(lipgloss.Color("#888888"))
 
 	timeStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#888888"))
+			Foreground(lipgloss.Color("#8C9299"))
+
+	hintKeyStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FA243C")).
+			Bold(true)
+
+	hintTextStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#565B61"))
 )
 
 func NewStatusBar(width int) StatusBar {
@@ -103,9 +110,25 @@ func (s *StatusBar) View(np models.NowPlaying) string {
 		flagControls,
 	)
 
-	keyhints := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#444444")).
-		Render("  [1-5] tabs  [/] search  [space] play/pause  [n/p] next/prev  [s] shuffle  [r] repeat  [←/→] seek  [q] quit")
+	keyhints := lipgloss.JoinHorizontal(
+		lipgloss.Left,
+		"  ",
+		renderHintGroup("1-5", "tabs"),
+		renderHintSpacer(),
+		renderHintGroup("/", "search"),
+		renderHintSpacer(),
+		renderHintGroup("z/x", "views"),
+		renderHintSpacer(),
+		renderHintGroup("space", "play"),
+		renderHintSpacer(),
+		renderHintGroup("n/p", "skip"),
+		renderHintSpacer(),
+		renderHintGroup("←/→", "seek"),
+		renderHintSpacer(),
+		renderHintGroup("s r", "modes"),
+		renderHintSpacer(),
+		renderHintGroup("q", "quit"),
+	)
 
 	full := lipgloss.JoinVertical(lipgloss.Left,
 		row,
@@ -113,6 +136,14 @@ func (s *StatusBar) View(np models.NowPlaying) string {
 	)
 
 	return statusBarStyle.Width(s.width).MaxWidth(s.width).MaxHeight(2).Render(full)
+}
+
+func renderHintGroup(key, text string) string {
+	return hintKeyStyle.Render(key) + hintTextStyle.Render(" "+text)
+}
+
+func renderHintSpacer() string {
+	return hintTextStyle.Render("  •  ")
 }
 
 func renderProgressBar(elapsed, total float64, width int) string {

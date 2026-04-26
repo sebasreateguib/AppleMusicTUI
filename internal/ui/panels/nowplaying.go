@@ -27,7 +27,7 @@ type NowPlayingPanel struct {
 
 var (
 	npFocusedBorder = lipgloss.Color("#FA243C")
-	npBlurredBorder = lipgloss.Color("#333333")
+	npBlurredBorder = lipgloss.Color("#2E3237")
 
 	appleAccentOnce    sync.Once
 	appleAccentContent string
@@ -37,17 +37,18 @@ var (
 			Foreground(lipgloss.Color("#FFFFFF"))
 
 	trackArtistStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FA243C"))
+				Foreground(lipgloss.Color("#FF4D67")).
+				Bold(true)
 
 	trackAlbumStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#888888")).
+			Foreground(lipgloss.Color("#7A8088")).
 			Italic(true)
 
 	infoLabelStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#666666"))
+			Foreground(lipgloss.Color("#666B72"))
 
 	infoValueStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#CCCCCC"))
+			Foreground(lipgloss.Color("#D5D9DE"))
 
 	volumeFilledStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#FA243C"))
@@ -242,7 +243,7 @@ func renderAppleAccent(width int) string {
 	shifted := strings.Join(lines, "\n")
 
 	colored := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FA243C")).
+		Foreground(lipgloss.Color("#A62E42")).
 		Render(shifted)
 
 	return lipgloss.Place(width, lipgloss.Height(shifted), lipgloss.Center, lipgloss.Top, colored)
@@ -276,6 +277,73 @@ func renderVolumeLine(width int, volume int) string {
 		volumeEmptyStyle.Render(strings.Repeat("░", empty))
 
 	return infoLabelStyle.Render(label) + bar + infoValueStyle.Render(pct)
+}
+
+func renderPlaybackLine(width int, elapsed, total float64) string {
+	if width < 16 {
+		width = 16
+	}
+	left := formatPlaybackTime(elapsed)
+	right := formatPlaybackTime(total)
+	barW := width - lipgloss.Width(left) - lipgloss.Width(right) - 4
+	if barW < 10 {
+		barW = 10
+	}
+
+	bar := renderInlineMeter(elapsed, total, barW, "━", "─", "●")
+	return lipgloss.JoinHorizontal(
+		lipgloss.Center,
+		infoValueStyle.Render(left),
+		" ",
+		bar,
+		" ",
+		infoValueStyle.Render(right),
+	)
+}
+
+func renderInlineMeter(value, total float64, width int, filled, empty, head string) string {
+	if width <= 0 {
+		return ""
+	}
+	if total <= 0 {
+		return volumeEmptyStyle.Render(strings.Repeat(empty, width))
+	}
+
+	ratio := value / total
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+
+	filledCount := int(math.Round(ratio * float64(width)))
+	if filledCount < 0 {
+		filledCount = 0
+	}
+	if filledCount > width {
+		filledCount = width
+	}
+	emptyCount := width - filledCount
+
+	if filledCount > 0 && filledCount < width {
+		return volumeFilledStyle.Render(strings.Repeat(filled, filledCount-1)) +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4D67")).Bold(true).Render(head) +
+			volumeEmptyStyle.Render(strings.Repeat(empty, emptyCount))
+	}
+
+	return volumeFilledStyle.Render(strings.Repeat(filled, filledCount)) +
+		volumeEmptyStyle.Render(strings.Repeat(empty, emptyCount))
+}
+
+func formatPlaybackTime(secs float64) string {
+	if secs < 0 {
+		secs = 0
+	}
+	total := int(math.Round(secs))
+	m := total / 60
+	s := total % 60
+	return fmt.Sprintf("%d:%02d", m, s)
 }
 
 func normalizeFormat(raw string) string {
@@ -408,13 +476,18 @@ func (n *NowPlayingPanel) View(tick int) string {
 	artist := truncate(track.Artist, innerWidth)
 	album := truncate(track.Album, innerWidth)
 
-	titleLine := trackTitleStyle.Render(title)
+	titleLine := lipgloss.NewStyle().
+		Width(innerWidth).
+		Align(lipgloss.Center).
+		Bold(true).
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Render(title)
 	artistLine := trackArtistStyle.Render(artist)
 	albumLine := trackAlbumStyle.Render(album)
 	apple := renderAppleAccent(innerWidth)
+	progressLine := renderPlaybackLine(innerWidth, np.Position, track.Duration)
 	volumeLine := renderVolumeLine(innerWidth, np.Volume)
 	formatText := normalizeFormat(track.Format)
-	formatLine := infoLabelStyle.Render("Format ") + infoValueStyle.Render(truncate(formatText, innerWidth-8))
 	footerText := encryptedFooterLabel("Apple Music TUI", tick)
 	footerLine := lipgloss.NewStyle().
 		Width(innerWidth).
@@ -427,24 +500,45 @@ func (n *NowPlayingPanel) View(tick int) string {
 	if isPlaying {
 		stateIcon = "▶"
 	}
-	stateStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FA243C")).Bold(true)
-	stateLine := stateStyle.Render(stateIcon + "  " + string(np.State))
+	stateStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FF4D67")).
+		Background(lipgloss.Color("#241116")).
+		Bold(true).
+		Padding(0, 2)
+	stateLine := lipgloss.NewStyle().
+		Width(innerWidth).
+		Align(lipgloss.Center).
+		Render(stateStyle.Render(stateIcon + "  " + string(np.State)))
+
+	metaLine := lipgloss.JoinHorizontal(
+		lipgloss.Center,
+		infoLabelStyle.Render("Vol "),
+		infoValueStyle.Render(fmt.Sprintf("%d%%", np.Volume)),
+		infoLabelStyle.Render("   ·   "),
+		infoLabelStyle.Render("Format "),
+		infoValueStyle.Render(formatText),
+	)
+	metaLine = lipgloss.NewStyle().
+		Width(innerWidth).
+		Align(lipgloss.Center).
+		Render(metaLine)
 
 	content := lipgloss.JoinVertical(
 		lipgloss.Center,
 		"",
-		"",
 		art,
 		"",
 		titleLine,
-		artistLine,
-		albumLine,
+		lipgloss.NewStyle().Width(innerWidth).Align(lipgloss.Center).Render(artistLine),
+		lipgloss.NewStyle().Width(innerWidth).Align(lipgloss.Center).Render(albumLine),
 		"",
 		stateLine,
 		"",
-		volumeLine,
+		progressLine,
 		"",
-		formatLine,
+		metaLine,
+		"",
+		volumeLine,
 		"",
 		"",
 		apple,

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"math/rand"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,6 +33,12 @@ type playbackIndexMsg struct {
 	contextType  string
 	contextValue string
 	index        int
+}
+
+type contextCountMsg struct {
+	contextType  string
+	contextValue string
+	count        int
 }
 
 type queueMsg []models.QueueTrack
@@ -93,6 +100,10 @@ type App struct {
 	playbackContextType  string
 	playbackContextValue string
 	playbackTrackIndex   int
+	playbackContextCount int
+	playbackShuffleOn    bool
+	playbackOrder        []int
+	playbackOrderPos     int
 }
 
 func NewApp(width, height int) App {
@@ -119,7 +130,7 @@ func NewApp(width, height int) App {
 		centerVisualizerHeight: centerVisH,
 		currentContextType:     "library",
 		currentContextValue:    "",
-		currentContextTotal:    999999,
+		currentContextTotal:    0,
 	}
 	app.updateFocusStyles()
 	return app
@@ -215,6 +226,13 @@ func fetchContextTracks(cType, cVal string, offset, limit int) tea.Cmd {
 	}
 }
 
+func fetchContextCount(cType, cVal string) tea.Cmd {
+	return func() tea.Msg {
+		count, _ := applescript.GetContextTrackCount(cType, cVal)
+		return contextCountMsg{contextType: cType, contextValue: cVal, count: count}
+	}
+}
+
 func searchLibrary(query string) tea.Cmd {
 	return func() tea.Msg {
 		results, _ := applescript.SearchLibrary(query)
@@ -267,6 +285,14 @@ func doToggleShuffle() tea.Cmd {
 	}
 }
 
+func doSetShuffle(enabled bool) tea.Cmd {
+	return func() tea.Msg {
+		_ = applescript.SetShuffle(enabled)
+		np, _ := applescript.GetNowPlaying()
+		return nowPlayingMsg(np)
+	}
+}
+
 func doToggleRepeat() tea.Cmd {
 	return func() tea.Msg {
 		_ = applescript.ToggleRepeat()
@@ -287,9 +313,9 @@ func doSeek(delta float64, current float64) tea.Cmd {
 	}
 }
 
-func doPlayTrackInContext(cType, cVal string, index int) tea.Cmd {
+func doPlayTrackInContext(cType, cVal string, index int, shuffleAfter bool) tea.Cmd {
 	return func() tea.Msg {
-		_ = applescript.PlayTrackInContext(cType, cVal, index)
+		_ = applescript.PlayTrackInContextWithShuffle(cType, cVal, index, shuffleAfter)
 		time.Sleep(400 * time.Millisecond)
 		np, _ := applescript.GetNowPlaying()
 		return nowPlayingMsg(np)
@@ -320,6 +346,7 @@ func (a App) Init() tea.Cmd {
 		fetchNowPlaying(),
 		fetchPlaylists(),
 		fetchContextTracks("library", "", 0, 30),
+		fetchContextCount("library", ""),
 	)
 }
 
@@ -359,10 +386,21 @@ func (a *App) refreshPlaylistList() {
 	a.stringListPanel.SetItems(items, "Playlists")
 }
 
-func (a *App) setPlaybackContext(contextType, contextValue string, index int) {
+func (a *App) setPlaybackContext(contextType, contextValue string, index, count int) {
 	a.playbackContextType = contextType
 	a.playbackContextValue = contextValue
 	a.playbackTrackIndex = index
+	if count > 0 {
+		a.playbackContextCount = count
+	} else {
+		a.playbackContextCount = 0
+	}
+	if a.playbackShuffleOn {
+		a.rebuildPlaybackOrder(index)
+	} else {
+		a.playbackOrder = nil
+		a.playbackOrderPos = 0
+	}
 }
 
 func (a App) hasContextualPlayback() bool {
@@ -378,18 +416,36 @@ func (a App) queueFetchCmd() tea.Cmd {
 
 func (a App) nextCmd() tea.Cmd {
 	if a.hasContextualPlayback() {
-		return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, a.playbackTrackIndex+1)
+		if a.playbackShuffleOn && len(a.playbackOrder) > 0 {
+			nextPos := a.playbackOrderPos + 1
+			if nextPos >= len(a.playbackOrder) {
+				nextPos = len(a.playbackOrder) - 1
+			}
+			if nextPos >= 0 && nextPos < len(a.playbackOrder) {
+				return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, a.playbackOrder[nextPos], true)
+			}
+		}
+		return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, a.playbackTrackIndex+1, false)
 	}
 	return doNext()
 }
 
 func (a App) prevCmd() tea.Cmd {
 	if a.hasContextualPlayback() {
+		if a.playbackShuffleOn && len(a.playbackOrder) > 0 {
+			targetPos := a.playbackOrderPos - 1
+			if targetPos < 0 {
+				targetPos = 0
+			}
+			if targetPos < len(a.playbackOrder) {
+				return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, a.playbackOrder[targetPos], true)
+			}
+		}
 		targetIndex := a.playbackTrackIndex - 1
 		if targetIndex < 1 {
 			targetIndex = 1
 		}
-		return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, targetIndex)
+		return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, targetIndex, false)
 	}
 	return doPrev()
 }
@@ -421,10 +477,10 @@ func (a *App) switchTopTab(tab TopTab) []tea.Cmd {
 		a.centerView = CenterContextTracks
 		a.currentContextType = "library"
 		a.currentContextValue = ""
-		a.currentContextTotal = 999999
+		a.currentContextTotal = 0
 		a.fetchingTracks = true
 		a.trackListPanel.SetTracks("Songs", []models.Track{}, a.nowPlaying.Track.Name)
-		cmds = append(cmds, fetchContextTracks("library", "", 0, 30))
+		cmds = append(cmds, fetchContextTracks("library", "", 0, 30), fetchContextCount("library", ""))
 
 	case TabPlaylists:
 		a.centerView = CenterStringList
@@ -475,12 +531,75 @@ func (a *App) openTracksForSelectedString() []tea.Cmd {
 	a.centerView = CenterContextTracks
 	a.currentContextType = cType
 	a.currentContextValue = selectedStr
-	a.currentContextTotal = 999999
+	a.currentContextTotal = 0
 	a.fetchingTracks = true
 	a.trackListPanel.SetTracks("Loading...", []models.Track{}, "")
 	a.updateFocusStyles()
 
-	return []tea.Cmd{fetchContextTracks(cType, selectedStr, 0, 30)}
+	return []tea.Cmd{fetchContextTracks(cType, selectedStr, 0, 30), fetchContextCount(cType, selectedStr)}
+}
+
+func (a *App) rebuildPlaybackOrder(currentIndex int) {
+	if !a.playbackShuffleOn || a.playbackContextCount < 1 || currentIndex < 1 {
+		a.playbackOrder = nil
+		a.playbackOrderPos = 0
+		return
+	}
+
+	order := make([]int, 0, a.playbackContextCount)
+	order = append(order, currentIndex)
+	for i := 1; i <= a.playbackContextCount; i++ {
+		if i != currentIndex {
+			order = append(order, i)
+		}
+	}
+
+	if len(order) > 1 {
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		r.Shuffle(len(order)-1, func(i, j int) {
+			i++
+			j++
+			order[i], order[j] = order[j], order[i]
+		})
+	}
+
+	a.playbackOrder = order
+	a.playbackOrderPos = 0
+}
+
+func (a *App) syncPlaybackPosition(index int) {
+	a.playbackTrackIndex = index
+	if !a.playbackShuffleOn {
+		return
+	}
+	for pos, trackIndex := range a.playbackOrder {
+		if trackIndex == index {
+			a.playbackOrderPos = pos
+			return
+		}
+	}
+	a.rebuildPlaybackOrder(index)
+}
+
+func (a *App) toggleContextShuffle() tea.Cmd {
+	a.playbackShuffleOn = !a.playbackShuffleOn
+	if a.playbackShuffleOn {
+		a.rebuildPlaybackOrder(a.playbackTrackIndex)
+	} else {
+		a.playbackOrder = nil
+		a.playbackOrderPos = 0
+	}
+	a.nowPlaying.ShuffleEnabled = a.playbackShuffleOn
+	a.nowPlayingPanel.SetNowPlaying(a.nowPlaying)
+
+	cmds := []tea.Cmd{doSetShuffle(a.playbackShuffleOn)}
+	if a.playbackShuffleOn && a.playbackContextCount == 0 {
+		cmds = append(cmds, fetchContextCount(a.playbackContextType, a.playbackContextValue))
+	}
+	if a.rightView == ViewQueue {
+		cmds = append(cmds, a.queueFetchCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -520,6 +639,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case nowPlayingMsg:
 		prevTrack := a.nowPlaying.Track
 		fresh := models.NowPlaying(msg)
+		if a.playbackContextType != "" {
+			fresh.ShuffleEnabled = a.playbackShuffleOn
+		}
 		fresh.ArtworkPath = a.nowPlaying.ArtworkPath
 		a.nowPlaying = fresh
 		a.nowPlayingPanel.SetNowPlaying(a.nowPlaying)
@@ -556,9 +678,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.stringListPanel.SetItems(msg.items, title)
 
+	case contextCountMsg:
+		if msg.contextType == a.currentContextType && msg.contextValue == a.currentContextValue {
+			a.currentContextTotal = msg.count
+		}
+		if msg.contextType == a.playbackContextType && msg.contextValue == a.playbackContextValue {
+			a.playbackContextCount = msg.count
+			if a.playbackShuffleOn {
+				a.rebuildPlaybackOrder(a.playbackTrackIndex)
+				if a.rightView == ViewQueue {
+					cmds = append(cmds, a.queueFetchCmd())
+				}
+			}
+		}
+
 	case playbackIndexMsg:
 		if msg.contextType == a.playbackContextType && msg.contextValue == a.playbackContextValue {
-			a.playbackTrackIndex = msg.index
+			a.syncPlaybackPosition(msg.index)
 			if a.rightView == ViewQueue {
 				cmds = append(cmds, a.queueFetchCmd())
 			}
@@ -649,7 +785,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, a.prevCmd())
 
 		case "s":
-			cmds = append(cmds, doToggleShuffle())
+			if a.hasContextualPlayback() {
+				cmds = append(cmds, a.toggleContextShuffle())
+			} else {
+				cmds = append(cmds, doToggleShuffle())
+			}
 
 		case "r":
 			cmds = append(cmds, doToggleRepeat())
@@ -702,13 +842,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if a.centerView == CenterContextTracks {
 					idx := a.trackListPanel.SelectedTrackIndex()
 					if idx > 0 && a.currentContextType != "" {
-						a.setPlaybackContext(a.currentContextType, a.currentContextValue, idx)
-						cmds = append(cmds, doPlayTrackInContext(a.currentContextType, a.currentContextValue, idx))
+						a.setPlaybackContext(a.currentContextType, a.currentContextValue, idx, a.currentContextTotal)
+						cmds = append(cmds, doPlayTrackInContext(a.currentContextType, a.currentContextValue, idx, a.playbackShuffleOn))
 					}
 				} else if a.centerView == CenterSearchResults {
 					track := a.searchPanel.SelectedTrack()
 					if track != nil {
-						a.setPlaybackContext("library", "", 0)
+						a.setPlaybackContext("library", "", 0, a.currentContextTotal)
 						cmds = append(cmds, doPlayLibraryTrack(*track))
 						cmds = append(cmds, fetchPlaybackIndex("library", "", *track))
 						a.rightView = ViewNowPlaying
@@ -728,7 +868,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					idx := a.trackListPanel.SelectedTrackIndex()
 					loaded := len(a.trackListPanel.GetTracks())
-					if idx >= loaded-10 && loaded < a.currentContextTotal && !a.fetchingTracks {
+					if idx >= loaded-10 && (a.currentContextTotal == 0 || loaded < a.currentContextTotal) && !a.fetchingTracks {
 						a.fetchingTracks = true
 						cmds = append(cmds, fetchContextTracks(a.currentContextType, a.currentContextValue, loaded, 30))
 					}

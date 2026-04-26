@@ -23,26 +23,20 @@ type StringListPanel struct {
 }
 
 var (
-	slFocusedStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#FA243C")).
-			Padding(0, 1)
-
-	slBlurredStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#333333")).
-			Padding(0, 1)
+	slFocusedBorder = lipgloss.Color("#FA243C")
+	slBlurredBorder = lipgloss.Color("#2E3237")
 )
 
 func NewStringListPanel(width, height int, title string) StringListPanel {
 	delegate := list.NewDefaultDelegate()
 	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
-		Foreground(lipgloss.Color("#e1ca72")).
+		Foreground(lipgloss.Color("#FFFFFF")).
+		Bold(true).
 		BorderLeftForeground(lipgloss.Color("#e1ca72"))
-	
+
 	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.
-		Foreground(lipgloss.Color("#CCCCCC"))
-	
+		Foreground(lipgloss.Color("#C6CBD1"))
+
 	delegate.ShowDescription = false
 
 	l := list.New([]list.Item{}, delegate, width-4, height-2)
@@ -50,6 +44,8 @@ func NewStringListPanel(width, height int, title string) StringListPanel {
 	l.Styles.Title = lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#FFFFFF")).
 		Bold(true)
+	l.Styles.StatusBar = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#666B72"))
 	l.SetShowHelp(false)
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
@@ -102,9 +98,9 @@ func (s *StringListPanel) Update(msg tea.Msg) tea.Cmd {
 }
 
 func (s *StringListPanel) View() string {
-	style := slBlurredStyle
+	border := slBlurredBorder
 	if s.focused {
-		style = slFocusedStyle
+		border = slFocusedBorder
 	}
-	return style.Width(s.width - 2).Height(s.height - 2).MaxWidth(s.width - 2).MaxHeight(s.height - 2).Render(s.list.View())
+	return renderRectBox(s.list.View(), s.width, s.height, border, lipgloss.Top)
 }

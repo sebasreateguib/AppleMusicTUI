@@ -126,6 +126,14 @@ func ToggleShuffle() error {
 	return runSilent(`tell application "Music" to set shuffle enabled to not shuffle enabled`)
 }
 
+func SetShuffle(enabled bool) error {
+	value := "false"
+	if enabled {
+		value = "true"
+	}
+	return runSilent(fmt.Sprintf(`tell application "Music" to set shuffle enabled to %s`, value))
+}
+
 func GetRepeatMode() (models.RepeatMode, error) {
 	out, err := run(`tell application "Music" to song repeat as string`)
 	if err != nil {
@@ -382,16 +390,67 @@ end tell`, escapedType, escapedValue, escapedType, escapedValue, escapedType, es
 	return tracks, nil
 }
 
-func PlayTrackInContext(contextType, contextValue string, trackIndex int) error {
+func GetContextTrackCount(contextType, contextValue string) (int, error) {
 	escapedType := escapeAppleScriptString(contextType)
 	escapedValue := escapeAppleScriptString(contextValue)
+
+	script := fmt.Sprintf(`
+tell application "Music"
+	if "%s" is "playlist" then
+		return (count of tracks of playlist "%s") as string
+	else if "%s" is "artist" then
+		return (count of (tracks of playlist "Library" whose artist is "%s")) as string
+	else if "%s" is "album" then
+		return (count of (tracks of playlist "Library" whose album is "%s")) as string
+	else if "%s" is "library" then
+		return (count of tracks of playlist "Library") as string
+	end if
+	return "0"
+end tell`,
+		escapedType,
+		escapedValue,
+		escapedType,
+		escapedValue,
+		escapedType,
+		escapedValue,
+		escapedType,
+	)
+
+	out, err := run(script)
+	if err != nil {
+		return 0, err
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func PlayTrackInContext(contextType, contextValue string, trackIndex int) error {
+	return PlayTrackInContextWithShuffle(contextType, contextValue, trackIndex, false)
+}
+
+func PlayTrackInContextWithShuffle(contextType, contextValue string, trackIndex int, shuffleAfter bool) error {
+	escapedType := escapeAppleScriptString(contextType)
+	escapedValue := escapeAppleScriptString(contextValue)
+	shuffleValue := "false"
+	if shuffleAfter {
+		shuffleValue = "true"
+	}
 	script := fmt.Sprintf(`
 tell application "Music"
 	if "%s" is "playlist" then
 		set thePlaylist to playlist "%s"
+		set shuffle enabled to false
 		play thePlaylist
-		delay 0.1
-		play track %d of thePlaylist
+		delay 0.35
+		if %d > 1 then
+			repeat with i from 2 to %d
+				next track
+				delay 0.1
+			end repeat
+		end if
 	else if "%s" is "artist" then
 		set tList to (tracks of playlist "Library" whose artist is "%s")
 		play item %d of tList
@@ -400,11 +459,18 @@ tell application "Music"
 		play item %d of tList
 	else if "%s" is "library" then
 		set theLibrary to playlist "Library"
+		set shuffle enabled to false
 		play theLibrary
-		delay 0.1
-		play track %d of theLibrary
+		delay 0.35
+		if %d > 1 then
+			repeat with i from 2 to %d
+				next track
+				delay 0.05
+			end repeat
+		end if
 	end if
-end tell`, escapedType, escapedValue, trackIndex, escapedType, escapedValue, trackIndex, escapedType, escapedValue, trackIndex, escapedType, trackIndex)
+	set shuffle enabled to %s
+end tell`, escapedType, escapedValue, trackIndex, trackIndex, escapedType, escapedValue, trackIndex, escapedType, escapedValue, trackIndex, escapedType, trackIndex, trackIndex, shuffleValue)
 
 	return runSilent(script)
 }
