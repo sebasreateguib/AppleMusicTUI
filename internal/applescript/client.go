@@ -438,11 +438,14 @@ func PlayTrackInContextWithShuffle(contextType, contextValue string, trackIndex 
 	if shuffleAfter {
 		shuffleValue = "true"
 	}
+
 	script := fmt.Sprintf(`
 tell application "Music"
+	set originalVolume to sound volume
 	if "%s" is "playlist" then
 		set thePlaylist to playlist "%s"
 		set shuffle enabled to false
+		set sound volume to 0
 		play thePlaylist
 		delay 0.35
 		if %d > 1 then
@@ -460,6 +463,7 @@ tell application "Music"
 	else if "%s" is "library" then
 		set theLibrary to playlist "Library"
 		set shuffle enabled to false
+		set sound volume to 0
 		play theLibrary
 		delay 0.35
 		if %d > 1 then
@@ -469,8 +473,25 @@ tell application "Music"
 			end repeat
 		end if
 	end if
+	set player position to 0
 	set shuffle enabled to %s
-end tell`, escapedType, escapedValue, trackIndex, trackIndex, escapedType, escapedValue, trackIndex, escapedType, escapedValue, trackIndex, escapedType, trackIndex, trackIndex, shuffleValue)
+	set sound volume to originalVolume
+end tell`,
+		escapedType,
+		escapedValue,
+		trackIndex,
+		trackIndex,
+		escapedType,
+		escapedValue,
+		trackIndex,
+		escapedType,
+		escapedValue,
+		trackIndex,
+		escapedType,
+		trackIndex,
+		trackIndex,
+		shuffleValue,
+	)
 
 	return runSilent(script)
 }

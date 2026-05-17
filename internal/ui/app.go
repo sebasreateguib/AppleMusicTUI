@@ -904,7 +904,7 @@ func (a App) View() string {
 		return "Loading..."
 	}
 
-	topView := renderTopBar(a.width, a.activeTopTab)
+	topView := renderTopBar(a.width, a.activeTopTab, a.tick)
 
 	centerW, _, mainH := a.layout.PanelSizes()
 

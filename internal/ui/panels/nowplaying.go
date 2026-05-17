@@ -86,10 +86,16 @@ func (n *NowPlayingPanel) targetArtworkWidth() int {
 	if innerWidth < 12 {
 		innerWidth = 12
 	}
-	// Reserve extra vertical space for top offset + metadata + state + vol/format + full ascii + footer line.
-	maxByHeight := (n.height - 20) * 2
-	if maxByHeight < 20 {
-		maxByHeight = 20
+	// Fixed content budget (lines):
+	//   title(1) + artist(1) + album(1) + state(1) + progress(1) + meta(1) + volume(1) + footer(1) = 8
+	//   apple ASCII art = 7 lines
+	//   minimum spacers between sections = 5 blank lines
+	//   box border = 2
+	// Total fixed overhead = 8 + 7 + 5 + 2 = 22
+	const fixedOverhead = 22
+	maxByHeight := (n.height - fixedOverhead) * 2
+	if maxByHeight < 8 {
+		maxByHeight = 8
 	}
 	if innerWidth > maxByHeight {
 		innerWidth = maxByHeight
@@ -453,10 +459,24 @@ func renderVisualizer(tick int, width int, height int, isPlaying bool) string {
 	return out.String()
 }
 
+// spacer returns n blank lines as a single joined string, or "" when n <= 0.
+func spacer(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	lines := make([]string, n)
+	return strings.Join(lines, "\n")
+}
+
 func (n *NowPlayingPanel) View(tick int) string {
 	innerWidth := n.width - 4
 	if innerWidth < 20 {
 		innerWidth = 20
+	}
+	// Box border eats 2 lines (top + bottom).
+	innerHeight := n.height - 2
+	if innerHeight < 10 {
+		innerHeight = 10
 	}
 
 	np := n.nowPlaying
@@ -482,8 +502,8 @@ func (n *NowPlayingPanel) View(tick int) string {
 		Bold(true).
 		Foreground(lipgloss.Color("#FFFFFF")).
 		Render(title)
-	artistLine := trackArtistStyle.Render(artist)
-	albumLine := trackAlbumStyle.Render(album)
+	artistLine := lipgloss.NewStyle().Width(innerWidth).Align(lipgloss.Center).Render(trackArtistStyle.Render(artist))
+	albumLine := lipgloss.NewStyle().Width(innerWidth).Align(lipgloss.Center).Render(trackAlbumStyle.Render(album))
 	apple := renderAppleAccent(innerWidth)
 	progressLine := renderPlaybackLine(innerWidth, np.Position, track.Duration)
 	volumeLine := renderVolumeLine(innerWidth, np.Volume)
@@ -523,27 +543,54 @@ func (n *NowPlayingPanel) View(tick int) string {
 		Align(lipgloss.Center).
 		Render(metaLine)
 
+	// --- Responsive layout -------------------------------------------------
+	// Each slot has a guaranteed minimum so sections never collapse together.
+	// Remaining slack (after minimums) is distributed evenly across all slots.
+	artH := lipgloss.Height(art)
+	appleH := lipgloss.Height(apple)
+
+	// Fixed lines (1 each): title, artist, album, state, progress, meta, volume, footer = 8
+	fixedLines := artH + appleH + 8
+
+	// Minimum blank lines per slot: top | after-art | after-state | before-apple | after-apple
+	minSlots := []int{0, 1, 1, 2, 1}
+	totalMin := 0
+	for _, m := range minSlots {
+		totalMin += m
+	}
+
+	slack := innerHeight - fixedLines - totalMin
+	if slack < 0 {
+		slack = 0
+	}
+	const numSlots = 5
+	big := slack / numSlots
+	extra := slack % numSlots
+
+	slotSize := func(idx int) int {
+		s := minSlots[idx] + big
+		if idx < extra {
+			s++
+		}
+		return s
+	}
+
 	content := lipgloss.JoinVertical(
 		lipgloss.Center,
-		"",
+		spacer(slotSize(0)), // top gap
 		art,
-		"",
+		spacer(slotSize(1)), // between art and track info
 		titleLine,
-		lipgloss.NewStyle().Width(innerWidth).Align(lipgloss.Center).Render(artistLine),
-		lipgloss.NewStyle().Width(innerWidth).Align(lipgloss.Center).Render(albumLine),
-		"",
+		artistLine,
+		albumLine,
 		stateLine,
-		"",
+		spacer(slotSize(2)), // between state and playback controls
 		progressLine,
-		"",
 		metaLine,
-		"",
 		volumeLine,
-		"",
-		"",
+		spacer(slotSize(3)), // before apple logo
 		apple,
-		"",
-		"",
+		spacer(slotSize(4)), // after apple logo
 		footerLine,
 	)
 
