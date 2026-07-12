@@ -74,10 +74,7 @@ func checkAndPrompt() bool {
 }
 
 func main() {
-	// 1. Mostrar la intro de arte ASCII
-	printLogo()
-
-	// 2. Verificar estado de Apple Music y preguntar si es necesario
+	// 1. Verificar estado de Apple Music y preguntar si es necesario
 	if !checkAndPrompt() {
 		os.Exit(0)
 	}

@@ -113,13 +113,11 @@ SR-Player/
 
 <br/>
 
-## 🚧 Known Limitations & Roadmap
+## 🚧 Next up:
 
 - [ ] Queue editing (reorder / remove tracks)
 - [ ] Lyrics view
 - [ ] Playlist creation / management
-- [ ] Full keyboard remapping support
-- [ ] Linux support (currently macOS only via AppleScript)
 
 <br/>
 

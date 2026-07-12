@@ -226,6 +226,46 @@ func truncate(s string, maxLen int) string {
 	return string(runes[:maxLen-1]) + "…"
 }
 
+// marqueeText scrolls a long string through a fixed-width window using the
+// animation tick. Strings that fit within maxWidth are returned unchanged.
+// The animation pauses at each end before reversing direction.
+func marqueeText(s string, maxWidth int, tick int) string {
+	runes := []rune(s)
+	if len(runes) <= maxWidth || maxWidth <= 0 {
+		return s
+	}
+
+	scrollLen := len(runes) - maxWidth
+	const pauseTicks = 20  // ~3 s pause at each end (tick = 150 ms)
+	const ticksPerStep = 5 // ~750 ms per character step
+
+	totalCycle := (pauseTicks * 2) + (scrollLen * ticksPerStep * 2)
+	if totalCycle <= 0 {
+		return string(runes[:maxWidth])
+	}
+	phase := tick % totalCycle
+
+	var offset int
+	switch {
+	case phase < pauseTicks:
+		offset = 0
+	case phase < pauseTicks+scrollLen*ticksPerStep:
+		offset = (phase - pauseTicks) / ticksPerStep
+	case phase < pauseTicks*2+scrollLen*ticksPerStep:
+		offset = scrollLen
+	default:
+		offset = scrollLen - (phase-pauseTicks*2-scrollLen*ticksPerStep)/ticksPerStep
+	}
+
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > scrollLen {
+		offset = scrollLen
+	}
+	return string(runes[offset : offset+maxWidth])
+}
+
 func renderAppleAccent(width int) string {
 	appleAccentOnce.Do(func() {
 		content, err := os.ReadFile("assets/am-ascii.txt")
@@ -363,6 +403,32 @@ func normalizeFormat(raw string) string {
 	return "Standard"
 }
 
+// renderFormatBadge returns a styled badge for the given audio format string.
+func renderFormatBadge(format string) string {
+	switch format {
+	case "Dolby Atmos":
+		return lipgloss.NewStyle().
+			Background(lipgloss.Color("#2D0A5A")).
+			Foreground(lipgloss.Color("#D4AAFF")).
+			Bold(true).
+			Padding(0, 1).
+			Render("✦ Dolby Atmos")
+	case "Lossless":
+		return lipgloss.NewStyle().
+			Background(lipgloss.Color("#0A3D1F")).
+			Foreground(lipgloss.Color("#6EE89A")).
+			Bold(true).
+			Padding(0, 1).
+			Render("◈ Lossless")
+	default:
+		return lipgloss.NewStyle().
+			Background(lipgloss.Color("#1A1D21")).
+			Foreground(lipgloss.Color("#6B7280")).
+			Padding(0, 1).
+			Render("◦ Standard")
+	}
+}
+
 func encryptedFooterLabel(base string, tick int) string {
 	// tick is emitted every ~150ms (see ui/tickCmd), so ~67 ticks ~= 10 seconds.
 	const periodTicks = 67
@@ -489,10 +555,11 @@ func (n *NowPlayingPanel) View(tick int) string {
 		art = n.artRendered
 	}
 
-	title := truncate(track.Name, innerWidth)
-	if title == "" {
-		title = "No track playing"
+	titleStr := track.Name
+	if titleStr == "" {
+		titleStr = "No track playing"
 	}
+	title := marqueeText(titleStr, innerWidth, tick)
 	artist := truncate(track.Artist, innerWidth)
 	album := truncate(track.Album, innerWidth)
 
@@ -530,18 +597,10 @@ func (n *NowPlayingPanel) View(tick int) string {
 		Align(lipgloss.Center).
 		Render(stateStyle.Render(stateIcon + "  " + string(np.State)))
 
-	metaLine := lipgloss.JoinHorizontal(
-		lipgloss.Center,
-		infoLabelStyle.Render("Vol "),
-		infoValueStyle.Render(fmt.Sprintf("%d%%", np.Volume)),
-		infoLabelStyle.Render("   ·   "),
-		infoLabelStyle.Render("Format "),
-		infoValueStyle.Render(formatText),
-	)
-	metaLine = lipgloss.NewStyle().
+	metaLine := lipgloss.NewStyle().
 		Width(innerWidth).
 		Align(lipgloss.Center).
-		Render(metaLine)
+		Render(renderFormatBadge(formatText))
 
 	// --- Responsive layout -------------------------------------------------
 	// Each slot has a guaranteed minimum so sections never collapse together.

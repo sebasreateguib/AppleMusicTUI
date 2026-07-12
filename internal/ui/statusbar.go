@@ -125,6 +125,8 @@ func (s *StatusBar) View(np models.NowPlaying) string {
 		renderHintSpacer(),
 		renderHintGroup("←/→", "seek"),
 		renderHintSpacer(),
+		renderHintGroup("+/-", "vol"),
+		renderHintSpacer(),
 		renderHintGroup("s r", "modes"),
 		renderHintSpacer(),
 		renderHintGroup("q", "quit"),

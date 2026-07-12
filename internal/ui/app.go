@@ -340,6 +340,21 @@ func doPlayLibraryTrack(track models.Track) tea.Cmd {
 	}
 }
 
+func doChangeVolume(delta int, current int) tea.Cmd {
+	return func() tea.Msg {
+		newVol := current + delta
+		if newVol < 0 {
+			newVol = 0
+		}
+		if newVol > 100 {
+			newVol = 100
+		}
+		_ = applescript.SetVolume(newVol)
+		np, _ := applescript.GetNowPlaying()
+		return nowPlayingMsg(np)
+	}
+}
+
 func (a App) Init() tea.Cmd {
 	return tea.Batch(
 		tickCmd(),
@@ -794,6 +809,11 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			cmds = append(cmds, doToggleRepeat())
 
+		case "+", "=":
+			cmds = append(cmds, doChangeVolume(5, a.nowPlaying.Volume))
+
+		case "-":
+			cmds = append(cmds, doChangeVolume(-5, a.nowPlaying.Volume))
 		case "left":
 			if a.focus == focusRight {
 				a.focus = focusCenter
