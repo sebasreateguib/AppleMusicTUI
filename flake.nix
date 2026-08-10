@@ -24,6 +24,7 @@
             description = "Terminal UI for Apple Music (macOS)";
             mainProgram = "SR-Player";
             platforms = platforms.darwin;
+            homepage = "https://github.com/sebasreateguib/AppleMusicTUI";
           };
         };
       });
