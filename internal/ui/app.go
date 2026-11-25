@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sebasreateguib/applemusictui/internal/applescript"
 	"github.com/sebasreateguib/applemusictui/internal/artwork"
 	"github.com/sebasreateguib/applemusictui/internal/cava"
 	"github.com/sebasreateguib/applemusictui/internal/config"
@@ -61,6 +62,9 @@ type queueMsg struct {
 
 type visualizerMsg cava.Event
 type seekedMsg models.NowPlaying
+
+// polledMsg is the answer to the periodic question.
+type polledMsg models.NowPlaying
 
 const (
 	// silenceNoticeAfter is how long a playing track may yield no audio before
@@ -139,8 +143,10 @@ type App struct {
 	noticeUntil   int // tick that hides the notice
 
 	nowPlaying models.NowPlaying
+	polling    bool // waiting for a polledMsg
 	lastTrack  models.Track
 	seek       seek
+	volume     volume
 
 	context    trackContext // shown in the tracks panel
 	loaded     bool         // the tracks of context have arrived
@@ -198,9 +204,10 @@ func NewApp(width, height int, cfg config.Config, imagesSupported bool) App {
 	return app
 }
 
-// Close releases the resources held by the app (the cava child process).
+// Close releases the resources held by the app (its child processes).
 func (a App) Close() {
 	a.visualizer.Close()
+	applescript.Close()
 }
 
 func (a App) isPlaying() bool {
@@ -525,8 +532,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.visHeardAt = time.Now()
 		}
 
-		if a.tick%6 == 0 {
-			cmds = append(cmds, fetchNowPlaying())
+		// Not while Music is slow to answer: the questions would pile up.
+		if a.tick%6 == 0 && !a.polling {
+			a.polling = true
+			cmds = append(cmds, pollNowPlaying())
 		}
 		// Also refreshed when the track changes.
 		if a.tick%40 == 0 {
@@ -537,9 +546,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case nowPlayingMsg:
 		cmds = append(cmds, a.receiveNowPlaying(models.NowPlaying(msg))...)
 
+	case polledMsg:
+		a.polling = false
+		cmds = append(cmds, a.receiveNowPlaying(models.NowPlaying(msg))...)
+
 	case seekedMsg:
 		a.seek.pending--
 		cmds = append(cmds, a.receiveNowPlaying(models.NowPlaying(msg))...)
+
+	case volumeMsg:
+		cmds = append(cmds, a.receiveVolume(msg)...)
 
 	case artworkMsg:
 		a.nowPlaying.ArtworkPath = string(msg)
@@ -603,6 +619,9 @@ func (a *App) receiveNowPlaying(fresh models.NowPlaying) []tea.Cmd {
 		fresh.ShuffleEnabled = a.playbackShuffleOn
 	}
 	fresh.ArtworkPath = a.nowPlaying.ArtworkPath
+	if a.volume.sending {
+		fresh.Volume = a.volume.target
+	}
 
 	prev := a.lastTrack
 	track := fresh.Track

@@ -92,9 +92,9 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case "p":
 		return a.prevCmd()
 	case "+", "=":
-		return doChangeVolume(5, a.nowPlaying.Volume)
+		return a.changeVolume(5)
 	case "-":
-		return doChangeVolume(-5, a.nowPlaying.Volume)
+		return a.changeVolume(-5)
 	case "s":
 		return a.toggleShuffle()
 	case "r":

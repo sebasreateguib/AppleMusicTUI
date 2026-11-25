@@ -57,18 +57,6 @@ func Stop() error {
 
 // --- Volume ---
 
-func GetVolume() (int, error) {
-	out, err := run(`tell application "Music" to sound volume`)
-	if err != nil {
-		return 0, err
-	}
-	v, err := strconv.Atoi(out)
-	if err != nil {
-		return 0, err
-	}
-	return v, nil
-}
-
 func SetVolume(v int) error {
 	if v < 0 {
 		v = 0
@@ -79,48 +67,13 @@ func SetVolume(v int) error {
 	return runSilent(fmt.Sprintf(`tell application "Music" to set sound volume to %d`, v))
 }
 
-// --- Player State ---
-
-func GetPlayerState() (models.PlayerState, error) {
-	out, err := run(`tell application "Music" to player state as string`)
-	if err != nil {
-		return models.StateStopped, err
-	}
-	switch strings.ToLower(out) {
-	case "playing":
-		return models.StatePlaying, nil
-	case "paused":
-		return models.StatePaused, nil
-	default:
-		return models.StateStopped, nil
-	}
-}
-
-func GetPlayerPosition() (float64, error) {
-	out, err := run(`tell application "Music" to player position`)
-	if err != nil {
-		return 0, err
-	}
-	pos, err := strconv.ParseFloat(out, 64)
-	if err != nil {
-		return 0, err
-	}
-	return pos, nil
-}
+// --- Player Position ---
 
 func SetPlayerPosition(pos float64) error {
 	return runSilent(fmt.Sprintf(`tell application "Music" to set player position to %f`, pos))
 }
 
 // --- Shuffle & Repeat ---
-
-func GetShuffle() (bool, error) {
-	out, err := run(`tell application "Music" to shuffle enabled`)
-	if err != nil {
-		return false, err
-	}
-	return strings.ToLower(out) == "true", nil
-}
 
 func SetShuffle(enabled bool) error {
 	value := "false"
@@ -135,14 +88,7 @@ func GetRepeatMode() (models.RepeatMode, error) {
 	if err != nil {
 		return models.RepeatOff, err
 	}
-	switch strings.ToLower(out) {
-	case "one":
-		return models.RepeatOne, nil
-	case "all":
-		return models.RepeatAll, nil
-	default:
-		return models.RepeatOff, nil
-	}
+	return parseRepeat(out), nil
 }
 
 func ToggleRepeat() error {
@@ -160,65 +106,6 @@ func ToggleRepeat() error {
 		next = "off"
 	}
 	return runSilent(fmt.Sprintf(`tell application "Music" to set song repeat to %s`, next))
-}
-
-// --- Current Track ---
-
-func GetCurrentTrack() (models.Track, error) {
-	script := `
-tell application "Music"
-	if player state is stopped then
-		return ""
-	end if
-	set t to current track
-	set trackName to name of t
-	set trackArtist to artist of t
-	set trackAlbum to album of t
-	set trackDuration to duration of t
-	set trackFormat to kind of t
-	return trackName & "||" & trackArtist & "||" & trackAlbum & "||" & trackDuration & "||" & trackFormat
-end tell`
-
-	out, err := run(script)
-	if err != nil || out == "" {
-		return models.Track{}, err
-	}
-
-	parts := strings.Split(out, "||")
-	if len(parts) < 5 {
-		return models.Track{}, fmt.Errorf("unexpected output: %s", out)
-	}
-
-	duration, _ := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
-
-	return models.Track{
-		Name:     strings.TrimSpace(parts[0]),
-		Artist:   strings.TrimSpace(parts[1]),
-		Album:    strings.TrimSpace(parts[2]),
-		Duration: duration,
-		Format:   strings.TrimSpace(parts[4]),
-	}, nil
-}
-
-// GetNowPlaying returns the full playback state.
-func GetNowPlaying() (models.NowPlaying, error) {
-	state, _ := GetPlayerState()
-	track, _ := GetCurrentTrack()
-	pos, _ := GetPlayerPosition()
-	posAt := time.Now() // what follows takes a while
-	shuffle, _ := GetShuffle()
-	repeat, _ := GetRepeatMode()
-	vol, _ := GetVolume()
-
-	return models.NowPlaying{
-		Track:          track,
-		State:          state,
-		Position:       pos,
-		PositionAt:     posAt,
-		ShuffleEnabled: shuffle,
-		RepeatMode:     repeat,
-		Volume:         vol,
-	}, nil
 }
 
 // --- Playlists ---
@@ -370,13 +257,11 @@ func parseTrackColumns(out string) ([]models.Track, error) {
 
 	tracks := make([]models.Track, len(cols[0]))
 	for i := range tracks {
-		// AppleScript writes decimals the way the user's region does.
-		secs, _ := strconv.ParseFloat(strings.Replace(strings.TrimSpace(cols[3][i]), ",", ".", 1), 64)
 		tracks[i] = models.Track{
 			Name:     strings.TrimSpace(cols[0][i]),
 			Artist:   strings.TrimSpace(cols[1][i]),
 			Album:    strings.TrimSpace(cols[2][i]),
-			Duration: secs,
+			Duration: parseDecimal(cols[3][i]),
 		}
 	}
 	return tracks, nil

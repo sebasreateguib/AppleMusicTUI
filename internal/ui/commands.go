@@ -9,6 +9,12 @@ import (
 	"github.com/sebasreateguib/applemusictui/internal/models"
 )
 
+// Music takes a moment to report what it was just told.
+const (
+	settleDelay = 300 * time.Millisecond // after changing a setting
+	trackDelay  = 600 * time.Millisecond // after changing the track
+)
+
 func tickCmd() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
@@ -26,6 +32,13 @@ func fetchNowPlaying() tea.Cmd {
 	return func() tea.Msg {
 		np, _ := applescript.GetNowPlaying()
 		return nowPlayingMsg(np)
+	}
+}
+
+func pollNowPlaying() tea.Cmd {
+	return func() tea.Msg {
+		np, _ := applescript.GetNowPlaying()
+		return polledMsg(np)
 	}
 }
 
@@ -82,6 +95,7 @@ func fetchUniqueStrings(kind string) tea.Cmd {
 func doPlayPause() tea.Cmd {
 	return func() tea.Msg {
 		_ = applescript.PlayPause()
+		time.Sleep(settleDelay)
 		np, _ := applescript.GetNowPlaying()
 		return nowPlayingMsg(np)
 	}
@@ -90,7 +104,7 @@ func doPlayPause() tea.Cmd {
 func doNext() tea.Cmd {
 	return func() tea.Msg {
 		_ = applescript.NextTrack()
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(trackDelay)
 		np, _ := applescript.GetNowPlaying()
 		return nowPlayingMsg(np)
 	}
@@ -99,7 +113,7 @@ func doNext() tea.Cmd {
 func doPrev() tea.Cmd {
 	return func() tea.Msg {
 		_ = applescript.PreviousTrack()
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(trackDelay)
 		np, _ := applescript.GetNowPlaying()
 		return nowPlayingMsg(np)
 	}
@@ -108,6 +122,7 @@ func doPrev() tea.Cmd {
 func doSetShuffle(enabled bool) tea.Cmd {
 	return func() tea.Msg {
 		_ = applescript.SetShuffle(enabled)
+		time.Sleep(settleDelay)
 		np, _ := applescript.GetNowPlaying()
 		return nowPlayingMsg(np)
 	}
@@ -116,6 +131,7 @@ func doSetShuffle(enabled bool) tea.Cmd {
 func doToggleRepeat() tea.Cmd {
 	return func() tea.Msg {
 		_ = applescript.ToggleRepeat()
+		time.Sleep(settleDelay)
 		np, _ := applescript.GetNowPlaying()
 		return nowPlayingMsg(np)
 	}
@@ -124,6 +140,7 @@ func doToggleRepeat() tea.Cmd {
 func doSeek(position float64) tea.Cmd {
 	return func() tea.Msg {
 		_ = applescript.SetPlayerPosition(position)
+		time.Sleep(settleDelay)
 		np, _ := applescript.GetNowPlaying()
 		return seekedMsg(np)
 	}
@@ -132,7 +149,7 @@ func doSeek(position float64) tea.Cmd {
 func doPlayTrackInContext(cType, cVal string, index int, shuffleAfter bool) tea.Cmd {
 	return func() tea.Msg {
 		_ = applescript.PlayTrackInContextWithShuffle(cType, cVal, index, shuffleAfter)
-		time.Sleep(400 * time.Millisecond)
+		time.Sleep(trackDelay)
 		np, _ := applescript.GetNowPlaying()
 		return nowPlayingMsg(np)
 	}
@@ -141,24 +158,17 @@ func doPlayTrackInContext(cType, cVal string, index int, shuffleAfter bool) tea.
 func doPlayLibraryTrack(track models.Track) tea.Cmd {
 	return func() tea.Msg {
 		_ = applescript.PlayTrackInLibrary(track)
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(trackDelay)
 		np, _ := applescript.GetNowPlaying()
 		return nowPlayingMsg(np)
 	}
 }
 
-func doChangeVolume(delta int, current int) tea.Cmd {
+func doSetVolume(volume int) tea.Cmd {
 	return func() tea.Msg {
-		newVol := current + delta
-		if newVol < 0 {
-			newVol = 0
-		}
-		if newVol > 100 {
-			newVol = 100
-		}
-		_ = applescript.SetVolume(newVol)
+		_ = applescript.SetVolume(volume) // reported right away
 		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
+		return volumeMsg{sent: volume, now: np}
 	}
 }
 
