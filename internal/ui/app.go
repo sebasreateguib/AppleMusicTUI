@@ -2,12 +2,16 @@ package ui
 
 import (
 	"math/rand"
+	"os"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"SR-Player/internal/applescript"
+	"SR-Player/internal/artwork"
+	"SR-Player/internal/cava"
+	"SR-Player/internal/config"
 	"SR-Player/internal/models"
 	"SR-Player/internal/ui/panels"
 )
@@ -15,6 +19,16 @@ import (
 type tickMsg time.Time
 type nowPlayingMsg models.NowPlaying
 type artworkMsg string
+
+// imageMsg reports that the artwork at path was uploaded to the terminal.
+type imageMsg struct {
+	path string
+	id   uint32
+	err  error
+}
+
+type configSavedMsg struct{ err error }
+
 type playlistsMsg []models.Playlist
 
 type contextTracksMsg struct {
@@ -43,6 +57,14 @@ type contextCountMsg struct {
 
 type queueMsg []models.QueueTrack
 type searchResultsMsg []models.Track
+type visualizerMsg cava.Event
+
+// silenceNoticeAfter is how long a playing track may yield no audio before the
+// visualizer explains why it is empty.
+const silenceNoticeAfter = 5 * time.Second
+
+// noticeTicks is how long a status bar notice stays visible (~3 s).
+const noticeTicks = 20
 
 type focusedPanel int
 
@@ -104,9 +126,22 @@ type App struct {
 	playbackShuffleOn    bool
 	playbackOrder        []int
 	playbackOrderPos     int
+
+	visualizer *cava.Visualizer
+	visLevels  []byte
+	visErr     error
+	visHeardAt time.Time // last time audio was heard, or none was expected
+
+	config          config.Config
+	imagesSupported bool
+	imageID         uint32 // image in the terminal, 0 if none
+	imagePath       string // artwork uploaded, or being uploaded
+	noticeUntil     int    // tick that hides the status bar notice
 }
 
-func NewApp(width, height int) App {
+// NewApp creates the app. imagesSupported tells whether the terminal can show
+// real images (see artwork.Supported).
+func NewApp(width, height int, cfg config.Config, imagesSupported bool) App {
 	tmpLayout := NewLayout(width, height)
 	centerW, rightW, mainH := tmpLayout.PanelSizes()
 	centerTracksH, centerVisH := splitCenterHeights(mainH)
@@ -131,9 +166,135 @@ func NewApp(width, height int) App {
 		currentContextType:     "library",
 		currentContextValue:    "",
 		currentContextTotal:    0,
+
+		visualizer: cava.New(),
+		visHeardAt: time.Now(),
+
+		config:          cfg,
+		imagesSupported: imagesSupported,
 	}
 	app.updateFocusStyles()
 	return app
+}
+
+// Close releases the resources held by the app (the cava child process).
+func (a App) Close() {
+	a.visualizer.Close()
+}
+
+func (a App) visualizerVisible() bool {
+	return a.centerView == CenterContextTracks && a.centerVisualizerHeight > 0
+}
+
+func (a App) isPlaying() bool {
+	return a.nowPlaying.State == models.StatePlaying
+}
+
+// updateVisualizer applies an event coming from cava.
+func (a *App) updateVisualizer(e cava.Event) {
+	a.visErr = e.Err
+	if e.Err != nil {
+		a.visLevels = nil
+		return
+	}
+	if !cava.IsSilent(e.Levels) {
+		a.visHeardAt = time.Now()
+	}
+	if !a.isPlaying() {
+		// cava hears the whole system: while Music is paused let the bars
+		// fall instead of following other apps.
+		for i := range e.Levels {
+			prev := 0
+			if i < len(a.visLevels) {
+				prev = int(a.visLevels[i]) * 7 / 10
+			}
+			e.Levels[i] = byte(min(int(e.Levels[i]), prev))
+		}
+	}
+	a.visLevels = e.Levels
+}
+
+// visualizerNotice explains an empty visualizer, or returns "".
+func (a App) visualizerNotice() string {
+	if a.visErr != nil {
+		return a.visErr.Error()
+	}
+	if a.isPlaying() && time.Since(a.visHeardAt) > silenceNoticeAfter {
+		return "No audio captured - allow your terminal in Privacy > System Audio Recording"
+	}
+	return ""
+}
+
+// syncImage makes the terminal hold the image the UI has to show, if any, and
+// returns the upload command when one is needed.
+func (a *App) syncImage() tea.Cmd {
+	path := ""
+	if a.config.PhotoArtwork && a.imagesSupported {
+		path = a.nowPlaying.ArtworkPath
+	}
+	if path == a.imagePath {
+		return nil
+	}
+
+	a.imagePath = path
+	a.nowPlayingPanel.SetImage(0)
+	artwork.Delete(a.imageID)
+	a.imageID = 0
+
+	if path == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		id, err := artwork.Upload(path)
+		return imageMsg{path: path, id: id, err: err}
+	}
+}
+
+// showImage handles a finished upload. The pixelated artwork stays on screen
+// when it failed.
+func (a *App) showImage(msg imageMsg) {
+	if msg.err != nil {
+		return
+	}
+	if msg.path != a.imagePath || a.imageID != 0 {
+		artwork.Delete(msg.id) // the track or the mode changed meanwhile
+		return
+	}
+	a.imageID = msg.id
+	a.nowPlayingPanel.SetImage(msg.id)
+}
+
+func (a *App) toggleArtwork() tea.Cmd {
+	if !a.imagesSupported {
+		a.setNotice("Photo artwork needs Ghostty or Kitty (outside a multiplexer)")
+		return nil
+	}
+
+	a.config.PhotoArtwork = !a.config.PhotoArtwork
+	if a.config.PhotoArtwork {
+		a.setNotice("Artwork: photo")
+	} else {
+		a.setNotice("Artwork: pixelated")
+	}
+
+	cmds := []tea.Cmd{a.syncImage()}
+	if path := a.nowPlaying.ArtworkPath; a.config.PhotoArtwork && path != "" {
+		// Another instance deletes the file when it starts: export it again.
+		if _, err := os.Stat(path); err != nil {
+			cmds = append(cmds, fetchArtwork())
+		}
+	}
+
+	cfg := a.config
+	cmds = append(cmds, func() tea.Msg {
+		return configSavedMsg{config.Save(cfg)}
+	})
+	return tea.Batch(cmds...)
+}
+
+func (a *App) setNotice(text string) {
+	a.statusBar.SetNotice(text)
+	a.noticeUntil = a.tick + noticeTicks
 }
 
 func splitCenterHeights(mainH int) (tracksH, visH int) {
@@ -170,6 +331,13 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+func (a App) waitVisualizer() tea.Cmd {
+	events := a.visualizer.Events()
+	return func() tea.Msg {
+		return visualizerMsg(<-events)
+	}
 }
 
 func fetchNowPlaying() tea.Cmd {
@@ -358,6 +526,7 @@ func doChangeVolume(delta int, current int) tea.Cmd {
 func (a App) Init() tea.Cmd {
 	return tea.Batch(
 		tickCmd(),
+		a.waitVisualizer(),
 		fetchNowPlaying(),
 		fetchPlaylists(),
 		fetchContextTracks("library", "", 0, 30),
@@ -635,10 +804,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.nowPlayingPanel.SetSize(rightW, mainH)
 		a.queuePanel.SetSize(rightW, mainH)
 		a.statusBar.SetWidth(msg.Width)
+		a.visualizer.Resize(panels.VisualizerBars(centerW))
+
+	case visualizerMsg:
+		a.updateVisualizer(cava.Event(msg))
+		cmds = append(cmds, a.waitVisualizer())
 
 	case tickMsg:
 		a.tick++
+		if a.tick >= a.noticeUntil {
+			a.statusBar.SetNotice("")
+		}
 		cmds = append(cmds, tickCmd())
+
+		a.visualizer.SetActive(a.visualizerVisible())
+		if !a.visualizerVisible() || !a.isPlaying() || a.nowPlaying.Volume == 0 {
+			a.visHeardAt = time.Now()
+		}
 
 		if a.tick%6 == 0 {
 			cmds = append(cmds, fetchNowPlaying())
@@ -665,7 +847,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.lastTrackName = a.nowPlaying.Track.Name
 			a.nowPlaying.ArtworkPath = ""
 			a.nowPlayingPanel.SetNowPlaying(a.nowPlaying)
-			cmds = append(cmds, fetchArtwork())
+			cmds = append(cmds, a.syncImage(), fetchArtwork())
 		}
 
 		if a.playbackContextType != "" &&
@@ -679,6 +861,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case artworkMsg:
 		a.nowPlaying.ArtworkPath = string(msg)
 		a.nowPlayingPanel.SetNowPlaying(a.nowPlaying)
+		cmds = append(cmds, a.syncImage())
+
+	case imageMsg:
+		a.showImage(msg)
+
+	case configSavedMsg:
+		if msg.err != nil {
+			a.setNotice("Could not save preferences: " + msg.err.Error())
+		}
 
 	case playlistsMsg:
 		a.playlists = []models.Playlist(msg)
@@ -766,6 +957,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "q", "Q":
+			// Before leaving the alternate screen, which owns the image.
+			artwork.Delete(a.imageID)
 			return a, tea.Quit
 
 		case "/":
@@ -808,6 +1001,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "r":
 			cmds = append(cmds, doToggleRepeat())
+
+		case "i":
+			cmds = append(cmds, a.toggleArtwork())
 
 		case "+", "=":
 			cmds = append(cmds, doChangeVolume(5, a.nowPlaying.Volume))
@@ -935,8 +1131,8 @@ func (a App) View() string {
 			visView := panels.RenderVisualizerPanel(
 				centerW,
 				a.centerVisualizerHeight,
-				a.tick,
-				a.nowPlaying.State == models.StatePlaying,
+				a.visLevels,
+				a.visualizerNotice(),
 				a.focus == focusCenter,
 			)
 			centerView = lipgloss.JoinVertical(lipgloss.Left, centerView, visView)

@@ -11,7 +11,8 @@ import (
 )
 
 type StatusBar struct {
-	width int
+	width  int
+	notice string
 }
 
 var (
@@ -50,6 +51,11 @@ func NewStatusBar(width int) StatusBar {
 
 func (s *StatusBar) SetWidth(width int) {
 	s.width = width
+}
+
+// SetNotice replaces the key hints with text until it is set to "".
+func (s *StatusBar) SetNotice(text string) {
+	s.notice = text
 }
 
 func (s *StatusBar) View(np models.NowPlaying) string {
@@ -110,7 +116,8 @@ func (s *StatusBar) View(np models.NowPlaying) string {
 		flagControls,
 	)
 
-	keyhints := lipgloss.JoinHorizontal(
+	quitHint := renderHintGroup("q", "quit")
+	hints := lipgloss.JoinHorizontal(
 		lipgloss.Left,
 		"  ",
 		renderHintGroup("1-5", "tabs"),
@@ -129,8 +136,16 @@ func (s *StatusBar) View(np models.NowPlaying) string {
 		renderHintSpacer(),
 		renderHintGroup("s r", "modes"),
 		renderHintSpacer(),
-		renderHintGroup("q", "quit"),
 	)
+	artHint := renderHintGroup("i", "art") + renderHintSpacer()
+	// The bar has room for two lines only: leave the hint out rather than wrap.
+	if lipgloss.Width(hints+artHint+quitHint) <= s.width-statusBarStyle.GetHorizontalPadding() {
+		hints += artHint
+	}
+	keyhints := hints + quitHint
+	if s.notice != "" {
+		keyhints = "  " + hintTextStyle.Render(s.notice)
+	}
 
 	full := lipgloss.JoinVertical(lipgloss.Left,
 		row,

@@ -12,6 +12,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"SR-Player/internal/artwork"
 	"SR-Player/internal/models"
 )
 
@@ -20,6 +21,8 @@ type NowPlayingPanel struct {
 	artCache    string
 	artRendered string
 	artWidth    int
+	imageID     uint32 // image uploaded to the terminal, 0 to draw pixels
+	artImageID  uint32 // image used by artRendered
 	width       int
 	height      int
 	focused     bool
@@ -77,6 +80,13 @@ func (n *NowPlayingPanel) SetSize(width, height int) {
 	}
 }
 
+// SetImage shows an image already uploaded to the terminal, or goes back to
+// the pixelated artwork when id is 0.
+func (n *NowPlayingPanel) SetImage(id uint32) {
+	n.imageID = id
+	n.ensureArtwork()
+}
+
 func (n *NowPlayingPanel) SetFocused(focused bool) {
 	n.focused = focused
 }
@@ -108,11 +118,23 @@ func (n *NowPlayingPanel) targetArtworkWidth() int {
 
 func (n *NowPlayingPanel) ensureArtwork() {
 	target := n.targetArtworkWidth()
-	if n.artRendered == "" || n.artCache != n.nowPlaying.ArtworkPath || n.artWidth != target {
+	if n.artRendered == "" || n.artCache != n.nowPlaying.ArtworkPath || n.artWidth != target || n.artImageID != n.imageID {
 		n.artCache = n.nowPlaying.ArtworkPath
 		n.artWidth = target
+		n.artImageID = n.imageID
+		if n.imageID != 0 {
+			rows := artworkRows(target)
+			artwork.Place(n.imageID, target, rows)
+			n.artRendered = artwork.Cells(n.imageID, target, rows)
+			return
+		}
 		n.artRendered = renderArtwork(n.nowPlaying.ArtworkPath, target)
 	}
+}
+
+// artworkRows returns the height, in cells, of a square charWidth cells wide.
+func artworkRows(charWidth int) int {
+	return max(5, charWidth/2)
 }
 
 func renderArtwork(path string, charWidth int) string {
@@ -135,10 +157,7 @@ func renderArtwork(path string, charWidth int) string {
 	srcW := bounds.Max.X - bounds.Min.X
 	srcH := bounds.Max.Y - bounds.Min.Y
 
-	charHeight := charWidth / 2
-	if charHeight < 5 {
-		charHeight = 5
-	}
+	charHeight := artworkRows(charWidth)
 	pixW := charWidth
 	pixH := charHeight * 2
 
@@ -185,10 +204,7 @@ func placeholderArt(charWidth int) string {
 	if charWidth < 10 {
 		charWidth = 10
 	}
-	charHeight := charWidth / 2
-	if charHeight < 5 {
-		charHeight = 5
-	}
+	charHeight := artworkRows(charWidth)
 
 	line := safeRepeat("░", charWidth)
 	mid := charHeight / 2
@@ -464,65 +480,29 @@ func encryptedFooterLabel(base string, tick int) string {
 	return string(out)
 }
 
-// renderVisualizer displays distinct vertical columns dancing like a traditional EQ.
-func renderVisualizer(tick int, width int, height int, isPlaying bool) string {
+// renderVisualizer draws one column per bar level (0-255), growing from the
+// bottom, with a blank column between bars.
+func renderVisualizer(levels []byte, width int, height int) string {
 	if height <= 0 || width <= 0 {
 		return ""
 	}
-	// Blocks growing from bottom to top vertically
-	blocks := []string{" ", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
+	blocks := []rune(" ▁▂▃▄▅▆▇█")
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#FA243C"))
+	bars := (width + 1) / 2
 
-	var out strings.Builder
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			// Leave a space between bars so they look like distinct vertical columns
-			if x%2 != 0 {
-				out.WriteString(" ")
-				continue
-			}
-
-			h := 0
-			if isPlaying {
-				v1 := math.Sin(float64(x)*0.8 + float64(tick)*0.6)
-				v2 := math.Cos(float64(x)*1.3 - float64(tick)*0.4)
-
-				noise := float64((tick*x)%5) * 0.1
-
-				val := (v1+v2+2.0)/4.0 + noise // roughly 0.0 to 1.0
-				if val > 1.0 {
-					val = 1.0
-				}
-				if val < 0 {
-					val = 0
-				}
-
-				h = int(val * float64(height*8))
-			}
-
-			// Invertimos la lógica para que la barra crezca desde la base (la base está en la línea 'height-1')
-			baseVal := (height - 1 - y) * 8
-			cellH := h - baseVal
-
-			if cellH < 0 {
-				cellH = 0
-			}
-			if cellH > 7 {
-				cellH = 7
-			}
-
-			color := lipgloss.Color("#FA243C")
-
-			if cellH == 0 {
-				out.WriteString(" ")
-			} else {
-				out.WriteString(lipgloss.NewStyle().Foreground(color).Render(blocks[cellH]))
-			}
+	rows := make([]string, height)
+	for y := range rows {
+		row := []rune(strings.Repeat(" ", width))
+		base := (height - 1 - y) * 8
+		for i := 0; i < bars && len(levels) > 0; i++ {
+			// Spread levels over the columns: the counts only differ while
+			// cava restarts after a resize, or on extremely wide terminals.
+			h := int(levels[i*len(levels)/bars]) * height * 8 / 255
+			row[i*2] = blocks[max(0, min(8, h-base))]
 		}
-		if y < height-1 {
-			out.WriteString("\n")
-		}
+		rows[y] = style.Render(string(row))
 	}
-	return out.String()
+	return strings.Join(rows, "\n")
 }
 
 // spacer returns n blank lines as a single joined string, or "" when n <= 0.
@@ -660,7 +640,19 @@ func (n *NowPlayingPanel) View(tick int) string {
 	return renderRectBoxAligned(content, n.width, n.height, border, lipgloss.Center, lipgloss.Top)
 }
 
-func RenderVisualizerPanel(width, height, tick int, isPlaying bool, focused bool) string {
+// visualizerInnerSize returns the drawing area of a visualizer panel.
+func visualizerInnerSize(width, height int) (int, int) {
+	return width - 4, height - 4
+}
+
+// VisualizerBars returns how many bars fit in a visualizer panel of that width.
+func VisualizerBars(width int) int {
+	inner, _ := visualizerInnerSize(width, 0)
+	return (inner + 1) / 2
+}
+
+// RenderVisualizerPanel draws the bars, or notice in their place when non-empty.
+func RenderVisualizerPanel(width, height int, levels []byte, notice string, focused bool) string {
 	if height <= 0 || width <= 0 {
 		return ""
 	}
@@ -670,14 +662,14 @@ func RenderVisualizerPanel(width, height, tick int, isPlaying bool, focused bool
 		border = lipgloss.Color("#FA243C")
 	}
 
-	// renderRectBox reserves the inner drawing area; use that for visualizer generation.
-	panelWidth := width - 2
-	panelHeight := height - 2
-	innerWidth := panelWidth - 2
-	innerHeight := panelHeight - 2
+	innerWidth, innerHeight := visualizerInnerSize(width, height)
 	if innerWidth < 1 || innerHeight < 1 {
 		return ""
 	}
-	vis := renderVisualizer(tick, innerWidth, innerHeight, isPlaying)
+	if notice != "" {
+		text := trackAlbumStyle.Render(truncate(notice, innerWidth))
+		return renderRectBoxAligned(text, width, height, border, lipgloss.Center, lipgloss.Center)
+	}
+	vis := renderVisualizer(levels, innerWidth, innerHeight)
 	return renderRectBox(vis, width, height, border, lipgloss.Bottom)
 }

@@ -14,10 +14,10 @@ A terminal-based Apple Music player for macOS, built with Go. Control your Apple
 
 ## ✨ Features
 
-- 🎧 **Now Playing panel** — album art rendered in the terminal using Unicode block characters
+- 🎧 **Now Playing panel** — album art rendered in the terminal using Unicode block characters, or as the real cover in Ghostty and Kitty (press `i`)
 - 📚 **Full library browsing** — Songs, Albums, Artists, and Playlists tabs
 - 🔍 **Search** — fuzzy search across your entire Apple Music library
-- 📊 **Equalizer visualizer** — animated bar visualizer that reacts to playback
+- 📊 **Equalizer visualizer** — bars driven by the real audio output through [cava](https://github.com/karlstav/cava)
 - ⌨️ **Keyboard-driven** — no mouse needed, fully navigable with hotkeys
 - 🍎 **Apple ASCII art** — decorative Apple logo always visible in the player panel
 - 🔀 **Shuffle & repeat** — toggle shuffle/repeat modes from the keyboard
@@ -30,6 +30,7 @@ A terminal-based Apple Music player for macOS, built with Go. Control your Apple
 - **macOS** (required — uses AppleScript to communicate with Apple Music)
 - **Apple Music** app installed and running
 - **Go 1.24+**
+- **cava 1.0+** for the visualizer (`brew install cava`, macOS 14.2+). On first run, allow your terminal under *System Settings → Privacy & Security → Screen & System Audio Recording*
 - A terminal with **true color** support (iTerm2, Warp, Kitty, etc.)
 
 <br/>
@@ -68,6 +69,7 @@ go run .
 | `p` | Previous track |
 | `s` | Toggle shuffle |
 | `r` | Toggle repeat |
+| `i` | Switch album art: pixelated / photo (Ghostty and Kitty only) |
 | `←` / `→` | Seek backward / forward |
 | `z` | Now Playing view |
 | `x` | Queue view |
@@ -87,6 +89,9 @@ SR-Player/
 │   └── am-ascii.txt         # Apple ASCII art
 └── internal/
     ├── applescript/         # macOS AppleScript bridge (playback, library queries)
+    ├── artwork/             # Real album art (Kitty graphics protocol)
+    ├── config/              # Saved preferences
+    ├── cava/                # cava child process (real audio levels)
     ├── models/              # Shared data types (Track, Playlist, NowPlaying, etc.)
     └── ui/                  # TUI layout and rendering
         ├── app.go           # Main Bubble Tea model (Update loop)

@@ -10,6 +10,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"SR-Player/internal/artwork"
+	"SR-Player/internal/config"
 	"SR-Player/internal/ui"
 )
 
@@ -81,12 +83,18 @@ func main() {
 
 	// 3. Iniciar el TUI
 	// Use alternate screen and mouse support
+	app := ui.NewApp(0, 0, config.Load(), artwork.Supported())
 	p := tea.NewProgram(
-		ui.NewApp(0, 0),
+		app,
 		tea.WithAltScreen(),
+		// Twice the visualizer rate: at 60 the renderer's clock would drift
+		// against cava's 60 fps and drop frames.
+		tea.WithFPS(120),
 	)
 
-	if _, err := p.Run(); err != nil {
+	_, err := p.Run()
+	app.Close()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error running SR-Player: %v\n", err)
 		os.Exit(1)
 	}
