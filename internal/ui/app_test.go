@@ -10,10 +10,10 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 
-	"SR-Player/internal/cava"
-	"SR-Player/internal/config"
-	"SR-Player/internal/models"
-	"SR-Player/internal/ui/theme"
+	"github.com/sebasreateguib/applemusictui/internal/cava"
+	"github.com/sebasreateguib/applemusictui/internal/config"
+	"github.com/sebasreateguib/applemusictui/internal/models"
+	"github.com/sebasreateguib/applemusictui/internal/ui/theme"
 )
 
 func send(t *testing.T, a App, msgs ...tea.Msg) App {
@@ -48,16 +48,16 @@ func filledApp(t *testing.T) App {
 	for i := range 80 {
 		names = append(names, fmt.Sprintf("Artista número %d with a very long name indeed", i))
 	}
-	return send(t, newTestApp(t),
+	a := send(t, newTestApp(t),
 		tea.WindowSizeMsg{Width: 140, Height: 45},
 		tracksMsg{ctx: trackContext{kind: kindLibrary}, tracks: tracks},
 		playlistsMsg{{Name: "Mix", Count: 3}, {Name: "Otra", Count: 1200}},
 		uniqueStringsMsg{kind: "artists", items: names},
 		uniqueStringsMsg{kind: "albums", items: names},
 		nowPlayingMsg{Track: tracks[7], State: models.StatePlaying, Position: 20, Volume: 70},
-		queueMsg{{Index: 1, Track: tracks[7], IsCurrent: true}, {Index: 2, Track: tracks[8]}},
 		visualizerMsg(cava.Event{Levels: []byte{10, 200, 90, 255, 0, 40}}),
 	)
+	return send(t, a, queueMsg{seq: a.queueSeq, tracks: []models.QueueTrack{{Index: 1, Track: tracks[7], IsCurrent: true}, {Index: 2, Track: tracks[8]}}})
 }
 
 // Every screen must fill the terminal exactly, or lines wrap and panels break.
@@ -96,7 +96,7 @@ func TestOpenBeforeThePreviewArrives(t *testing.T) {
 		t.Fatalf("context = %v, focus = %v, %d tracks", a.context, a.focus, a.tracks.Len())
 	}
 	a = send(t, a, press("enter")) // nothing to play yet
-	if a.playbackContextType != "" {
+	if a.hasContext() {
 		t.Fatal("played a track that has not arrived")
 	}
 
@@ -106,8 +106,8 @@ func TestOpenBeforeThePreviewArrives(t *testing.T) {
 		t.Fatal("showed the tracks of another context")
 	}
 	a = send(t, a, tracksMsg{ctx: want, tracks: []models.Track{{Name: "A"}, {Name: "B"}}}, press("down"), press("enter"))
-	if a.playbackContextType != kindArtist || a.playbackContextValue != want.value || a.playbackTrackIndex != 2 || a.playbackContextCount != 2 {
-		t.Fatalf("played %s %q %d/%d", a.playbackContextType, a.playbackContextValue, a.playbackTrackIndex, a.playbackContextCount)
+	if a.playback != want || a.playbackTrackIndex != 2 {
+		t.Fatalf("played %v %d", a.playback, a.playbackTrackIndex)
 	}
 }
 

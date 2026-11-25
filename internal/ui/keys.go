@@ -3,8 +3,8 @@ package ui
 import (
 	tea "github.com/charmbracelet/bubbletea"
 
-	"SR-Player/internal/artwork"
-	"SR-Player/internal/ui/panels"
+	"github.com/sebasreateguib/applemusictui/internal/artwork"
+	"github.com/sebasreateguib/applemusictui/internal/ui/panels"
 )
 
 var helpBindings = []panels.Binding{
@@ -23,7 +23,7 @@ var helpBindings = []panels.Binding{
 	{Text: "Playback"},
 	{Key: "space", Text: "Play / pause"},
 	{Key: "n p", Text: "Next / previous track"},
-	{Key: ", .", Text: "Back / forward 10 seconds"},
+	{Key: "mouse", Text: "Click or drag the progress bar"},
 	{Key: "+ -", Text: "Volume"},
 	{Key: "s", Text: "Shuffle"},
 	{Key: "r", Text: "Repeat"},
@@ -91,19 +91,12 @@ func (a *App) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return a.nextCmd()
 	case "p":
 		return a.prevCmd()
-	case ",":
-		return doSeek(-10, a.nowPlaying.Position)
-	case ".":
-		return doSeek(10, a.nowPlaying.Position)
 	case "+", "=":
 		return doChangeVolume(5, a.nowPlaying.Volume)
 	case "-":
 		return doChangeVolume(-5, a.nowPlaying.Volume)
 	case "s":
-		if a.hasContextualPlayback() {
-			return a.toggleContextShuffle()
-		}
-		return doToggleShuffle()
+		return a.toggleShuffle()
 	case "r":
 		return doToggleRepeat()
 	case "i":
@@ -173,12 +166,13 @@ func (a *App) playSelected() tea.Cmd {
 		return nil
 	}
 	if a.context.kind == kindSearch {
-		a.setPlaybackContext(kindLibrary, "", 0, len(a.trackCache[trackContext{kind: kindLibrary}]))
-		return tea.Batch(doPlayLibraryTrack(*track), fetchPlaybackIndex(kindLibrary, "", *track))
+		// Found again in the library once it plays, see locatePlaying.
+		a.setPlaybackContext(trackContext{kind: kindLibrary}, 0)
+		a.expected = *track
+		return doPlayLibraryTrack(*track)
 	}
-	index := a.tracks.SelectedIndex()
-	a.setPlaybackContext(a.context.kind, a.context.value, index, a.tracks.Len())
-	return doPlayTrackInContext(a.context.kind, a.context.value, index, a.playbackShuffleOn)
+	a.setPlaybackContext(a.context, 0)
+	return a.playIndex(a.tracks.SelectedIndex())
 }
 
 func (a *App) quit() tea.Cmd {

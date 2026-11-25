@@ -5,7 +5,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"SR-Player/internal/ui/theme"
+	"github.com/sebasreateguib/applemusictui/internal/ui/theme"
 )
 
 // SideItem is a row of a SideList.

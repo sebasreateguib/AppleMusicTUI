@@ -3,7 +3,7 @@ package ui
 import (
 	"strings"
 
-	"SR-Player/internal/ui/panels"
+	"github.com/sebasreateguib/applemusictui/internal/ui/panels"
 )
 
 const (

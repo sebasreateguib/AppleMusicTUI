@@ -12,9 +12,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"SR-Player/internal/artwork"
-	"SR-Player/internal/models"
-	"SR-Player/internal/ui/theme"
+	"github.com/sebasreateguib/applemusictui/assets"
+	"github.com/sebasreateguib/applemusictui/internal/artwork"
+	"github.com/sebasreateguib/applemusictui/internal/models"
+	"github.com/sebasreateguib/applemusictui/internal/ui/theme"
 )
 
 const (
@@ -201,11 +202,7 @@ var (
 // appleLogo returns the ASCII logo as lines of equal width.
 func appleLogo() []string {
 	appleLogoOnce.Do(func() {
-		content, err := os.ReadFile("assets/am-ascii.txt")
-		if err != nil {
-			return
-		}
-		lines := strings.Split(strings.TrimRight(string(content), "\n"), "\n")
+		lines := strings.Split(strings.TrimRight(assets.Logo, "\n"), "\n")
 		width := 0
 		for i, l := range lines {
 			lines[i] = strings.TrimPrefix(l, "     ")

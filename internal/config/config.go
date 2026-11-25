@@ -3,6 +3,8 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -12,22 +14,34 @@ type Config struct {
 	PhotoArtwork bool `json:"photo_artwork"`
 }
 
-func path() (string, error) {
+const (
+	dirName    = "applemusictui"
+	oldDirName = "sr-player" // the player's former name
+)
+
+func path(name string) (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "sr-player", "config.json"), nil
+	return filepath.Join(dir, name, "config.json"), nil
+}
+
+func read(name string) ([]byte, error) {
+	p, err := path(name)
+	if err != nil {
+		return nil, err
+	}
+	return os.ReadFile(p)
 }
 
 // Load returns the saved preferences, or the defaults if there are none.
 func Load() Config {
 	var c Config
-	p, err := path()
-	if err != nil {
-		return c
+	data, err := read(dirName)
+	if errors.Is(err, fs.ErrNotExist) {
+		data, err = read(oldDirName)
 	}
-	data, err := os.ReadFile(p)
 	if err != nil {
 		return c
 	}
@@ -39,7 +53,7 @@ func Load() Config {
 
 // Save writes the preferences.
 func Save(c Config) error {
-	p, err := path()
+	p, err := path(dirName)
 	if err != nil {
 		return err
 	}

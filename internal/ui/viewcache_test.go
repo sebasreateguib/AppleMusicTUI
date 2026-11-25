@@ -6,9 +6,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"SR-Player/internal/cava"
-	"SR-Player/internal/config"
-	"SR-Player/internal/models"
+	"github.com/sebasreateguib/applemusictui/internal/cava"
+	"github.com/sebasreateguib/applemusictui/internal/config"
+	"github.com/sebasreateguib/applemusictui/internal/models"
 )
 
 func newTestApp(t *testing.T) App {
@@ -75,8 +75,8 @@ func TestViewCacheIsNeverStale(t *testing.T) {
 	}
 	step("preview", previewMsg{a.previewSeq})
 	step("preview tracks", tracksMsg{ctx: a.context, tracks: tracks[:1]})
-	step("queue", queueMsg{{Index: 1, Track: models.Track{Name: "Queued"}}})
-	step("queue again", queueMsg{{Index: 1, Track: models.Track{Name: "Other"}, IsCurrent: true}})
+	step("queue", queueMsg{a.queueSeq, []models.QueueTrack{{Index: 1, Track: models.Track{Name: "Queued"}}}})
+	step("queue again", queueMsg{a.queueSeq, []models.QueueTrack{{Index: 1, Track: models.Track{Name: "Other"}, IsCurrent: true}}})
 	for _, k := range []string{"5", "down", "i", "s", "r", "R", "?", "down", "esc", "/", "a", "esc", "1", "h", "l"} {
 		key(k)
 	}

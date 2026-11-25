@@ -7,7 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 
-	"SR-Player/internal/ui/theme"
+	"github.com/sebasreateguib/applemusictui/internal/ui/theme"
 )
 
 // SearchPrompt is the popup that asks what to search for.

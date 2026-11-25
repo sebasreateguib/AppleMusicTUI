@@ -3,7 +3,7 @@ package applescript
 import (
 	"testing"
 
-	"SR-Player/internal/models"
+	"github.com/sebasreateguib/applemusictui/internal/models"
 )
 
 func TestParseTrackColumns(t *testing.T) {

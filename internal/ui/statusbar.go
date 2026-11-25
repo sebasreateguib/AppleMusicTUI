@@ -7,12 +7,36 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"SR-Player/internal/models"
-	"SR-Player/internal/ui/panels"
-	"SR-Player/internal/ui/theme"
+	"github.com/sebasreateguib/applemusictui/internal/models"
+	"github.com/sebasreateguib/applemusictui/internal/ui/panels"
+	"github.com/sebasreateguib/applemusictui/internal/ui/theme"
 )
 
 const brand = "Apple Music TUI"
+
+// playerLine is the line of the playback bar, and where its progress bar goes.
+type playerLine struct {
+	before, after string
+	barX, barW    int
+}
+
+func newPlayerLine(np models.NowPlaying, width int, withTrack bool) playerLine {
+	inner := width - 2
+	before := " "
+	if withTrack && np.Track.Name != "" {
+		name := ansi.Truncate(np.Track.Name, inner/4, "…")
+		artist := ansi.Truncate(np.Track.Artist, inner/6, "…")
+		before += theme.Bold.Render(name) + theme.Dim.Render(" "+artist) + "  "
+	}
+	total := formatTime(np.Track.Duration)
+	// As wide as the total, so that the bar does not move while it is dragged.
+	elapsed := fmt.Sprintf("%*s", len(total), formatTime(np.Position))
+	before += theme.Text.Render(elapsed) + " "
+	after := " " + theme.Dim.Render(total)
+
+	barX := ansi.StringWidth(before)
+	return playerLine{before, after, barX, inner - barX - ansi.StringWidth(after) - 1}
+}
 
 // renderPlayer draws the playback bar. withTrack adds the track's name, for
 // when the Now Playing panel is not on screen.
@@ -25,17 +49,8 @@ func renderPlayer(np models.NowPlaying, width int, withTrack bool) string {
 		title = "┃┃ Paused"
 	}
 
-	inner := width - 2
-	left := " "
-	if withTrack && np.Track.Name != "" {
-		name := ansi.Truncate(np.Track.Name, inner/4, "…")
-		artist := ansi.Truncate(np.Track.Artist, inner/6, "…")
-		left += theme.Bold.Render(name) + theme.Dim.Render(" "+artist) + "  "
-	}
-	elapsed, total := formatTime(np.Position), formatTime(np.Track.Duration)
-	barW := inner - ansi.StringWidth(left) - len(elapsed) - len(total) - 3
-	line := left + theme.Text.Render(elapsed) + " " +
-		renderProgressBar(np.Position, np.Track.Duration, barW) + " " + theme.Dim.Render(total)
+	l := newPlayerLine(np, width, withTrack)
+	line := l.before + renderProgressBar(np.Position, np.Track.Duration, l.barW) + l.after
 
 	frame := panels.Frame{Title: title, Info: playerInfo(np), Focused: np.State == models.StatePlaying}
 	return frame.Render(width, playerHeight, []string{line})
@@ -76,11 +91,9 @@ func renderProgressBar(elapsed, total float64, width int) string {
 		return theme.Faint.Render(strings.Repeat("━", width))
 	}
 	ratio := max(0, min(1, elapsed/total))
-	filled := clamp(int(math.Round(ratio*float64(width))), 0, width)
-	if filled == 0 || filled == width {
-		return theme.Red.Render(strings.Repeat("━", filled)) + theme.Faint.Render(strings.Repeat("━", width-filled))
-	}
-	return theme.Red.Render(strings.Repeat("━", filled-1)+"●") + theme.Faint.Render(strings.Repeat("━", width-filled))
+	// The head is always visible: it is what the mouse moves, see App.seekTo.
+	head := int(math.Round(ratio * float64(width-1)))
+	return theme.Red.Render(strings.Repeat("━", head)+"●") + theme.Faint.Render(strings.Repeat("━", width-1-head))
 }
 
 // hint is an action offered in the bottom line.

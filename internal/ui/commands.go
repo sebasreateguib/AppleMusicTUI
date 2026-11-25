@@ -5,8 +5,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"SR-Player/internal/applescript"
-	"SR-Player/internal/models"
+	"github.com/sebasreateguib/applemusictui/internal/applescript"
+	"github.com/sebasreateguib/applemusictui/internal/models"
 )
 
 func tickCmd() tea.Cmd {
@@ -43,17 +43,27 @@ func fetchArtwork() tea.Cmd {
 	}
 }
 
-func fetchQueue() tea.Cmd {
+func fetchQueue(seq int) tea.Cmd {
 	return func() tea.Msg {
 		tracks, _ := applescript.GetQueueTracks()
-		return queueMsg(tracks)
+		return queueMsg{seq: seq, tracks: tracks}
 	}
 }
 
-func fetchContextQueue(cType, cVal string, currentIndex int) tea.Cmd {
+// fetchCurrentContext asks what Music is playing, to then set shuffle.
+func fetchCurrentContext(shuffle bool) tea.Cmd {
 	return func() tea.Msg {
-		tracks, _ := applescript.GetQueueTracksForContext(cType, cVal, currentIndex, 10)
-		return queueMsg(tracks)
+		msg := currentContextMsg{shuffle: shuffle}
+		kind, value, err := applescript.GetCurrentContext()
+		if err != nil {
+			return msg
+		}
+		tracks, err := applescript.GetTracks(kind, value)
+		if err != nil {
+			return msg
+		}
+		msg.ctx, msg.tracks = trackContext{kind, value}, tracks
+		return msg
 	}
 }
 
@@ -66,24 +76,6 @@ func fetchUniqueStrings(kind string) tea.Cmd {
 			items, _ = applescript.GetUniqueAlbums()
 		}
 		return uniqueStringsMsg{kind: kind, items: items}
-	}
-}
-
-func fetchContextCount(cType, cVal string) tea.Cmd {
-	return func() tea.Msg {
-		count, _ := applescript.GetContextTrackCount(cType, cVal)
-		return contextCountMsg{contextType: cType, contextValue: cVal, count: count}
-	}
-}
-
-func fetchPlaybackIndex(cType, cVal string, track models.Track) tea.Cmd {
-	return func() tea.Msg {
-		idx, _ := applescript.FindTrackIndexInContext(cType, cVal, track)
-		return playbackIndexMsg{
-			contextType:  cType,
-			contextValue: cVal,
-			index:        idx,
-		}
 	}
 }
 
@@ -113,14 +105,6 @@ func doPrev() tea.Cmd {
 	}
 }
 
-func doToggleShuffle() tea.Cmd {
-	return func() tea.Msg {
-		_ = applescript.ToggleShuffle()
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
-}
-
 func doSetShuffle(enabled bool) tea.Cmd {
 	return func() tea.Msg {
 		_ = applescript.SetShuffle(enabled)
@@ -137,15 +121,11 @@ func doToggleRepeat() tea.Cmd {
 	}
 }
 
-func doSeek(delta float64, current float64) tea.Cmd {
+func doSeek(position float64) tea.Cmd {
 	return func() tea.Msg {
-		pos := current + delta
-		if pos < 0 {
-			pos = 0
-		}
-		_ = applescript.SetPlayerPosition(pos)
+		_ = applescript.SetPlayerPosition(position)
 		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
+		return seekedMsg(np)
 	}
 }
 

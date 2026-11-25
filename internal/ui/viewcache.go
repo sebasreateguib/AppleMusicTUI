@@ -5,7 +5,7 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"SR-Player/internal/models"
+	"github.com/sebasreateguib/applemusictui/internal/models"
 )
 
 // section keeps the lines a part of the screen was last rendered to. The

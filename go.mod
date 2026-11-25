@@ -1,4 +1,4 @@
-module SR-Player
+module github.com/sebasreateguib/applemusictui
 
 go 1.24.2
 

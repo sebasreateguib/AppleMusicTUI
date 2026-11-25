@@ -1,92 +1,41 @@
 package main
 
 import (
-	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"SR-Player/internal/artwork"
-	"SR-Player/internal/config"
-	"SR-Player/internal/ui"
+	"github.com/sebasreateguib/applemusictui/internal/artwork"
+	"github.com/sebasreateguib/applemusictui/internal/config"
+	"github.com/sebasreateguib/applemusictui/internal/ui"
 )
 
-func printLogo() {
-	content, err := os.ReadFile("assets/am-ascii.txt")
-	if err != nil {
-		// Si no existe el archivo, ignoramos la intro gráfica
-		return
-	}
-	lines := strings.Split(string(content), "\n")
-
-	// Limpiar pantalla al inicio antes de imprimir el arte
-	fmt.Print("\033[H\033[2J")
-
-	for _, line := range lines {
-		// Imprime cada línea coloreada en rojo intenso (\033[31m)
-		fmt.Printf("\033[31m%s\033[0m\n", line)
-		// Simula el retraso exacto que usabas con perl (sleep 0.008)
-		time.Sleep(8 * time.Millisecond)
-	}
-	fmt.Println()
-}
-
-func checkAndPrompt() bool {
-	cmd := exec.Command("pgrep", "-x", "Music")
-	if err := cmd.Run(); err == nil {
-		// Apple Music ya está corriendo. Una pausa de cortesía para ver el logo completo y arrancamos.
-		time.Sleep(500 * time.Millisecond)
-		return true
-	}
-
-	// Apple Music está cerrado
-	fmt.Print("\033[1;37mApple Music no está en ejecución.\033[0m\n")
-	fmt.Print("\033[1;32m[1]\033[0m Prender Apple Music e iniciar\n")
-	fmt.Print("\033[1;31m[2]\033[0m Salir del TUI\n")
-	fmt.Print("\n\033[1;36m>\033[0m Elige una opción: ")
-
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		text := strings.TrimSpace(scanner.Text())
-		if text == "1" {
-			fmt.Print("\n\033[33mIniciando Apple Music en segundo plano...\033[0m\n")
-			exec.Command("open", "-a", "Music").Run()
-
-			// Esperar a que levante completamente y registre AppleEvents
-			for i := 0; i < 5; i++ {
-				time.Sleep(1 * time.Second)
-				if exec.Command("pgrep", "-x", "Music").Run() == nil {
-					// Buffer de seguridad para que Music cargue su librería antes de las peticiones
-					time.Sleep(1 * time.Second) 
-					break
-				}
-			}
-			return true
-		} else if text == "2" || strings.ToLower(text) == "q" {
-			fmt.Print("\n\033[31mSaliendo del TUI...\033[0m\n")
-			return false
-		}
-		fmt.Print("\033[31mOpción inválida.\033[0m Elige [1] o [2]: ")
-	}
-	return false
-}
+// version is set by the release build.
+var version = "dev"
 
 func main() {
-	// 1. Verificar estado de Apple Music y preguntar si es necesario
-	if !checkAndPrompt() {
-		os.Exit(0)
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		fmt.Println("applemusictui", version)
+		return
 	}
 
-	// 3. Iniciar el TUI
-	// Use alternate screen and mouse support
+	if err := ensureMusic(); err != nil {
+		if errors.Is(err, context.Canceled) {
+			os.Exit(130) // Ctrl+C
+		}
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	// Use alternate screen and mouse support (clicks and drags)
 	app := ui.NewApp(0, 0, config.Load(), artwork.Supported())
 	p := tea.NewProgram(
 		app,
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 		// Twice the visualizer rate: at 60 the renderer's clock would drift
 		// against cava's 60 fps and drop frames.
 		tea.WithFPS(120),
@@ -95,7 +44,7 @@ func main() {
 	_, err := p.Run()
 	app.Close()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error running SR-Player: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error running applemusictui: %v\n", err)
 		os.Exit(1)
 	}
 }

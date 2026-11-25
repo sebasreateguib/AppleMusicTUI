@@ -9,12 +9,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"SR-Player/internal/artwork"
-	"SR-Player/internal/cava"
-	"SR-Player/internal/config"
-	"SR-Player/internal/models"
-	"SR-Player/internal/ui/panels"
-	"SR-Player/internal/ui/theme"
+	"github.com/sebasreateguib/applemusictui/internal/artwork"
+	"github.com/sebasreateguib/applemusictui/internal/cava"
+	"github.com/sebasreateguib/applemusictui/internal/config"
+	"github.com/sebasreateguib/applemusictui/internal/models"
+	"github.com/sebasreateguib/applemusictui/internal/ui/panels"
+	"github.com/sebasreateguib/applemusictui/internal/ui/theme"
 )
 
 type tickMsg time.Time
@@ -46,20 +46,21 @@ type uniqueStringsMsg struct {
 	items []string
 }
 
-type playbackIndexMsg struct {
-	contextType  string
-	contextValue string
-	index        int
+// currentContextMsg is the playlist Music is playing, to shuffle it or not.
+// It has no tracks when there is none.
+type currentContextMsg struct {
+	ctx     trackContext
+	tracks  []models.Track
+	shuffle bool
 }
 
-type contextCountMsg struct {
-	contextType  string
-	contextValue string
-	count        int
+type queueMsg struct {
+	seq    int
+	tracks []models.QueueTrack
 }
 
-type queueMsg []models.QueueTrack
 type visualizerMsg cava.Event
+type seekedMsg models.NowPlaying
 
 const (
 	// silenceNoticeAfter is how long a playing track may yield no audio before
@@ -139,19 +140,22 @@ type App struct {
 
 	nowPlaying models.NowPlaying
 	lastTrack  models.Track
+	seek       seek
 
 	context    trackContext // shown in the tracks panel
 	loaded     bool         // the tracks of context have arrived
 	trackCache map[trackContext][]models.Track
 	previewSeq int
 
-	playbackContextType  string
-	playbackContextValue string
-	playbackTrackIndex   int
-	playbackContextCount int
-	playbackShuffleOn    bool
-	playbackOrder        []int
-	playbackOrderPos     int
+	playback           trackContext // list being played, empty if unknown
+	playbackTrackIndex int          // 1-based position in it, 0 if unknown
+	playbackShuffleOn  bool
+	playbackOrder      []int // indexes in playing order, when shuffled
+	playbackOrderPos   int
+	expected           models.Track // started by the app
+	nowPlayingAt       time.Time    // when nowPlaying.Position was true
+	advancedAt         time.Time    // when the app last moved on to the next track
+	queueSeq           int
 
 	visualizer *cava.Visualizer
 	visLevels  []byte
@@ -429,15 +433,22 @@ func (a *App) showContext(ctx trackContext) tea.Cmd {
 	return fetchTracks(ctx)
 }
 
-func (a *App) receiveTracks(msg tracksMsg) {
+func (a *App) receiveTracks(msg tracksMsg) tea.Cmd {
 	if msg.err == nil && msg.ctx.kind != kindSearch {
 		a.trackCache[msg.ctx] = msg.tracks
 		if msg.ctx.kind == kindLibrary {
 			a.setLibraryCount(len(msg.tracks))
 		}
 	}
+	var cmd tea.Cmd
+	if msg.err == nil && a.hasContext() && msg.ctx == a.playback {
+		if len(a.playbackOrder) != len(msg.tracks) {
+			a.playbackOrder = nil // the list changed: shuffle it again
+		}
+		cmd = a.locatePlaying()
+	}
 	if msg.ctx != a.context || a.loaded {
-		return
+		return cmd
 	}
 	empty := "No tracks"
 	switch {
@@ -448,6 +459,7 @@ func (a *App) receiveTracks(msg tracksMsg) {
 	}
 	a.loaded = true
 	a.tracks.SetTracks(msg.ctx.kind, msg.ctx.title(), msg.tracks, empty)
+	return cmd
 }
 
 func (a *App) setLibraryCount(count int) {
@@ -457,14 +469,22 @@ func (a *App) setLibraryCount(count int) {
 // refresh forgets what is known about the library and asks for it again.
 func (a *App) refresh() tea.Cmd {
 	a.setNotice("Refreshing library…")
+	playing, ok := a.trackCache[a.playback]
 	clear(a.trackCache)
+	var fetchPlaying tea.Cmd
+	if ok { // needed until the new one arrives
+		a.trackCache[a.playback] = playing
+		if a.playback != a.context {
+			fetchPlaying = fetchTracks(a.playback)
+		}
+	}
 	a.loaded = false
 	a.tracks.SetLoading(a.context.kind, a.context.title())
 	fetch := fetchTracks(a.context)
 	if a.context.kind == kindSearch {
 		fetch = searchLibrary(a.context.value)
 	}
-	return tea.Batch(fetch, fetchPlaylists(), fetchUniqueStrings("artists"), fetchUniqueStrings("albums"))
+	return tea.Batch(fetch, fetchPlaying, fetchPlaylists(), fetchUniqueStrings("artists"), fetchUniqueStrings("albums"))
 }
 
 func (a App) Init() tea.Cmd {
@@ -476,7 +496,7 @@ func (a App) Init() tea.Cmd {
 		fetchUniqueStrings("artists"),
 		fetchUniqueStrings("albums"),
 		fetchTracks(a.context),
-		a.queueFetchCmd(),
+		fetchQueue(a.queueSeq),
 	)
 }
 
@@ -510,10 +530,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Also refreshed when the track changes.
 		if a.tick%40 == 0 {
-			cmds = append(cmds, a.queueFetchCmd())
+			cmds = append(cmds, a.refreshQueue())
 		}
+		cmds = append(cmds, a.advanceCmd(time.Now()))
 
 	case nowPlayingMsg:
+		cmds = append(cmds, a.receiveNowPlaying(models.NowPlaying(msg))...)
+
+	case seekedMsg:
+		a.seek.pending--
 		cmds = append(cmds, a.receiveNowPlaying(models.NowPlaying(msg))...)
 
 	case artworkMsg:
@@ -549,29 +574,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tracksMsg:
-		a.receiveTracks(msg)
+		cmds = append(cmds, a.receiveTracks(msg))
 
-	case contextCountMsg:
-		if msg.contextType == a.playbackContextType && msg.contextValue == a.playbackContextValue {
-			a.playbackContextCount = msg.count
-			if a.playbackShuffleOn {
-				a.rebuildPlaybackOrder(a.playbackTrackIndex)
-				cmds = append(cmds, a.queueFetchCmd())
-			}
-		}
-
-	case playbackIndexMsg:
-		if msg.contextType == a.playbackContextType && msg.contextValue == a.playbackContextValue {
-			a.syncPlaybackPosition(msg.index)
-			cmds = append(cmds, a.queueFetchCmd())
-		}
+	case currentContextMsg:
+		cmds = append(cmds, a.receiveCurrentContext(msg))
 
 	case queueMsg:
-		a.queue.SetTracks(msg)
+		a.receiveQueue(msg)
 
 	case tea.KeyMsg:
 		// Not in the return statement: it would copy a before the key changes it.
 		cmds = append(cmds, a.handleKey(msg))
+
+	case tea.MouseMsg:
+		cmds = append(cmds, a.handleMouse(msg))
 
 	default:
 		if a.popup == popupSearch { // cursor blink
@@ -583,7 +599,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) receiveNowPlaying(fresh models.NowPlaying) []tea.Cmd {
-	if a.playbackContextType != "" {
+	if a.hasContextualPlayback() {
 		fresh.ShuffleEnabled = a.playbackShuffleOn
 	}
 	fresh.ArtworkPath = a.nowPlaying.ArtworkPath
@@ -593,21 +609,35 @@ func (a *App) receiveNowPlaying(fresh models.NowPlaying) []tea.Cmd {
 	changed := track.Name != prev.Name || track.Artist != prev.Artist || track.Album != prev.Album
 	if changed {
 		fresh.ArtworkPath = ""
+		a.seek.dragging = false
+	} else if a.seek.pending > 0 {
+		fresh.Position = a.seek.sent // reported before the seek
+	}
+	now := time.Now()
+	var takeBack tea.Cmd
+	if changed { // before forgetting where the previous track was
+		takeBack = a.takeBackCmd(fresh, now)
 	}
 	a.lastTrack = track
 	a.nowPlaying = fresh
+	a.nowPlayingAt = now
+	if !fresh.PositionAt.IsZero() && a.seek.pending == 0 {
+		a.nowPlayingAt = fresh.PositionAt
+	}
 	a.nowPlayingPanel.SetNowPlaying(fresh)
 	a.tracks.SetCurrent(track)
 	if !changed {
 		return nil
 	}
 
-	cmds := []tea.Cmd{a.syncImage(), fetchArtwork()}
-	if a.playbackContextType != "" && track.Name != "" {
-		// The queue follows once the position is known.
-		return append(cmds, fetchPlaybackIndex(a.playbackContextType, a.playbackContextValue, track))
+	if takeBack != nil {
+		return []tea.Cmd{a.syncImage(), takeBack}
 	}
-	return append(cmds, a.queueFetchCmd())
+	cmds := []tea.Cmd{a.syncImage(), fetchArtwork()}
+	if a.hasContext() && track.Name != "" {
+		return append(cmds, a.locatePlaying())
+	}
+	return append(cmds, a.refreshQueue())
 }
 
 func (a App) View() string {
@@ -623,8 +653,9 @@ func (a App) View() string {
 
 	lines := joinColumns(a.columns()...)
 	withTrack := !a.layout.wide()
-	lines = append(lines, a.fade(a.cache.player.get(playerKey{a.width, a.nowPlaying, withTrack}, func() []string {
-		return fitLines(renderPlayer(a.nowPlaying, a.width, withTrack), a.width, playerHeight)
+	np := a.shownNowPlaying()
+	lines = append(lines, a.fade(a.cache.player.get(playerKey{a.width, np, withTrack}, func() []string {
+		return fitLines(renderPlayer(np, a.width, withTrack), a.width, playerHeight)
 	}))...)
 	brandText := encryptedLabel(brand, a.tick)
 	lines = append(lines, a.fade(a.cache.bottom.get(bottomKey{a.width, a.focus, a.notice, brandText}, func() []string {

@@ -9,8 +9,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"SR-Player/internal/models"
-	"SR-Player/internal/ui/theme"
+	"github.com/sebasreateguib/applemusictui/internal/models"
+	"github.com/sebasreateguib/applemusictui/internal/ui/theme"
 )
 
 // TrackList is the main panel: the tracks of the selected playlist, artist or
@@ -49,14 +49,10 @@ func (t *TrackList) SetTracks(kind, title string, tracks []models.Track, empty s
 
 // SetCurrent marks the track that is playing.
 func (t *TrackList) SetCurrent(track models.Track) {
-	if !sameTrack(t.current, track) {
+	if !t.current.Same(track) {
 		t.current = track
 		t.revision++
 	}
-}
-
-func sameTrack(a, b models.Track) bool {
-	return a.Name == b.Name && a.Artist == b.Artist && a.Album == b.Album
 }
 
 func (t *TrackList) Len() int { return len(t.tracks) }
@@ -81,7 +77,7 @@ func (t *TrackList) Selected() *models.Track {
 // SelectCurrent selects the track that is playing, if it is in the list.
 func (t *TrackList) SelectCurrent() bool {
 	for i, tr := range t.tracks {
-		if t.current.Name != "" && sameTrack(tr, t.current) {
+		if t.current.Name != "" && tr.Same(t.current) {
 			t.cur.set(i)
 			t.cur.center()
 			t.revision++
@@ -149,7 +145,7 @@ func (t *TrackList) View() string {
 
 func (t *TrackList) row(i int, cols trackColumns) string {
 	tr := t.tracks[i]
-	playing := t.current.Name != "" && sameTrack(tr, t.current)
+	playing := t.current.Name != "" && tr.Same(t.current)
 
 	styles := [6]lipgloss.Style{theme.Active, theme.Dim, theme.Text, theme.Dim, theme.Dim, theme.Dim}
 	marker := ""

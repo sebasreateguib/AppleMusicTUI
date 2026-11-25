@@ -209,7 +209,7 @@ func IsSilent(levels []byte) bool {
 // neither used nor modified. source=tap captures the system output directly
 // (macOS 14.2+), with no virtual audio device.
 func writeConfig(bars int) (string, error) {
-	f, err := os.CreateTemp("", "sr-player-cava-*.conf")
+	f, err := os.CreateTemp("", "applemusictui-cava-*.conf")
 	if err != nil {
 		return "", err
 	}

@@ -1,5 +1,7 @@
 package models
 
+import "time"
+
 // PlayerState represents the current state of the Music app player.
 type PlayerState string
 
@@ -27,6 +29,12 @@ type Track struct {
 	Format   string
 }
 
+// Same reports whether both are the same track. Details such as the format are
+// not always known.
+func (t Track) Same(o Track) bool {
+	return t.Name == o.Name && t.Artist == o.Artist && t.Album == o.Album
+}
+
 // Playlist holds metadata for a playlist.
 type Playlist struct {
 	Name  string
@@ -37,7 +45,8 @@ type Playlist struct {
 type NowPlaying struct {
 	Track          Track
 	State          PlayerState
-	Position       float64 // current position in seconds
+	Position       float64   // current position in seconds
+	PositionAt     time.Time // when it was read, zero if unknown
 	ShuffleEnabled bool
 	RepeatMode     RepeatMode
 	Volume         int    // 0-100

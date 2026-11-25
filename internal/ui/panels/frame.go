@@ -7,7 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"SR-Player/internal/ui/theme"
+	"github.com/sebasreateguib/applemusictui/internal/ui/theme"
 )
 
 // Frame is the box around every panel. Its title, position and scrollbar live

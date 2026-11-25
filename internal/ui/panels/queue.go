@@ -2,16 +2,18 @@ package panels
 
 import (
 	"slices"
+	"strings"
 
 	"github.com/charmbracelet/x/ansi"
 
-	"SR-Player/internal/models"
-	"SR-Player/internal/ui/theme"
+	"github.com/sebasreateguib/applemusictui/internal/models"
+	"github.com/sebasreateguib/applemusictui/internal/ui/theme"
 )
 
 // QueuePanel lists the current and upcoming tracks.
 type QueuePanel struct {
 	tracks        []models.QueueTrack
+	note          string // shown below the tracks
 	cur           cursor
 	width, height int
 	focused       bool
@@ -20,11 +22,12 @@ type QueuePanel struct {
 
 func NewQueuePanel() QueuePanel { return QueuePanel{} }
 
-func (q *QueuePanel) SetTracks(tracks []models.QueueTrack) {
-	if slices.Equal(q.tracks, tracks) {
+// SetTracks replaces the tracks; note, if any, is shown below them.
+func (q *QueuePanel) SetTracks(tracks []models.QueueTrack, note string) {
+	if slices.Equal(q.tracks, tracks) && q.note == note {
 		return
 	}
-	q.tracks = tracks
+	q.tracks, q.note = tracks, note
 	q.cur.setTotal(len(tracks))
 	q.cur.set(0)
 	q.revision++
@@ -66,6 +69,12 @@ func (q *QueuePanel) View() string {
 	lines := make([]string, 0, to-from)
 	for i := from; i < to; i++ {
 		lines = append(lines, q.row(i, inner))
+	}
+	if q.note != "" {
+		lines = append(lines, "")
+		for _, l := range strings.Split(ansi.Wordwrap(q.note, max(1, inner-4), ""), "\n") {
+			lines = append(lines, "  "+theme.Dim.Render(l))
+		}
 	}
 	return frame.Render(q.width, q.height, lines)
 }
