@@ -11,7 +11,6 @@ A terminal-based Apple Music player for macOS, built with Go. Browse your librar
 <div align="center">
   <img src="assets/demo.gif" width=800 />
   <br/>
-  <sub>Recorded with an earlier version: the current layout and keys are different.</sub>
 </div>
 
 ## ✨ Features
