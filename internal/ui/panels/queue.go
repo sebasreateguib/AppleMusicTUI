@@ -1,109 +1,93 @@
 package panels
 
 import (
-	"fmt"
+	"slices"
 
-	"github.com/charmbracelet/bubbles/list"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"SR-Player/internal/models"
+	"SR-Player/internal/ui/theme"
 )
 
-type queueItem struct {
-	qt models.QueueTrack
-}
-
-func (q queueItem) Title() string {
-	prefix := "  "
-	if q.qt.IsCurrent {
-		prefix = "▶ "
-	}
-	return prefix + q.qt.Track.Name
-}
-
-func (q queueItem) Description() string {
-	return fmt.Sprintf("  %s", q.qt.Track.Artist)
-}
-
-func (q queueItem) FilterValue() string { return q.qt.Track.Name }
-
+// QueuePanel lists the current and upcoming tracks.
 type QueuePanel struct {
-	list    list.Model
-	width   int
-	height  int
-	focused bool
+	tracks        []models.QueueTrack
+	cur           cursor
+	width, height int
+	focused       bool
+	revision      int // grows with every change to what View shows
 }
 
-var (
-	queueFocusedBorder = lipgloss.Color("#FA243C")
-	queueBlurredBorder = lipgloss.Color("#333333")
-)
-
-func NewQueuePanel(width, height int) QueuePanel {
-	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
-		Foreground(lipgloss.Color("#FA243C")).
-		BorderLeftForeground(lipgloss.Color("#FA243C"))
-	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.
-		Foreground(lipgloss.Color("#FA243C")).
-		BorderLeftForeground(lipgloss.Color("#FA243C"))
-
-	// Highlight current track in green
-	delegate.Styles.NormalTitle = delegate.Styles.NormalTitle.
-		Foreground(lipgloss.Color("#CCCCCC"))
-
-	l := list.New([]list.Item{}, delegate, width-4, height-4)
-	l.Title = "Queue"
-	l.Styles.Title = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Bold(true)
-	l.SetShowHelp(false)
-	l.SetShowStatusBar(false)
-	l.SetFilteringEnabled(false)
-
-	return QueuePanel{
-		list:   l,
-		width:  width,
-		height: height,
-	}
-}
+func NewQueuePanel() QueuePanel { return QueuePanel{} }
 
 func (q *QueuePanel) SetTracks(tracks []models.QueueTrack) {
-	items := make([]list.Item, len(tracks))
-	for i, qt := range tracks {
-		items[i] = queueItem{qt: qt}
+	if slices.Equal(q.tracks, tracks) {
+		return
 	}
-	q.list.SetItems(items)
-
-	for i, qt := range tracks {
-		if qt.IsCurrent {
-			q.list.Select(i)
-			break
-		}
-	}
+	q.tracks = tracks
+	q.cur.setTotal(len(tracks))
+	q.cur.set(0)
+	q.revision++
 }
 
 func (q *QueuePanel) SetSize(width, height int) {
-	q.width = width
-	q.height = height
-	q.list.SetSize(width-4, height-4)
+	q.width, q.height = width, height
+	q.cur.setRows(height - 2)
+	q.revision++
 }
 
 func (q *QueuePanel) SetFocused(focused bool) {
-	q.focused = focused
+	if q.focused != focused {
+		q.focused = focused
+		q.revision++
+	}
 }
 
-func (q *QueuePanel) Update(msg tea.Msg) tea.Cmd {
-	var cmd tea.Cmd
-	q.list, cmd = q.list.Update(msg)
-	return cmd
+func (q *QueuePanel) HandleKey(key string) {
+	if q.cur.handleKey(key) {
+		q.revision++
+	}
 }
+
+// Revision changes whenever View would render something else.
+func (q *QueuePanel) Revision() int { return q.revision }
 
 func (q *QueuePanel) View() string {
-	border := queueBlurredBorder
-	if q.focused {
-		border = queueFocusedBorder
+	inner := q.width - 2
+	frame := Frame{
+		Key: "5", Title: "Up Next", Focused: q.focused,
+		Top: q.cur.top, Visible: q.cur.rows, Total: len(q.tracks),
 	}
-	return renderRectBox(q.list.View(), q.width, q.height, border, lipgloss.Top)
+	if len(q.tracks) == 0 {
+		return frame.Render(q.width, q.height, message("Nothing queued", inner, q.height-2))
+	}
+
+	from, to := q.cur.window()
+	lines := make([]string, 0, to-from)
+	for i := from; i < to; i++ {
+		lines = append(lines, q.row(i, inner))
+	}
+	return frame.Render(q.width, q.height, lines)
+}
+
+func (q *QueuePanel) row(i, width int) string {
+	qt := q.tracks[i]
+	name, artist := theme.Text, theme.Dim
+	marker := "  "
+	if qt.IsCurrent {
+		marker = "▶ "
+		name = theme.Active
+	}
+	if i == q.cur.index && q.focused {
+		name = name.Background(theme.SelectedBg).Bold(true)
+		artist = artist.Background(theme.SelectedBg)
+	}
+
+	text := " " + marker + ansi.Truncate(qt.Track.Name, max(0, width-4), "…")
+	rest := width - ansi.StringWidth(text)
+	by := ""
+	if rest >= 8 {
+		by = ansi.Truncate("  "+qt.Track.Artist, rest-1, "…")
+	}
+	return name.Render(text) + artist.Render(Fit(by, max(0, rest)))
 }

@@ -1,19 +1,20 @@
 package ui
 
 import (
-	"math/rand"
+	"fmt"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
-	"SR-Player/internal/applescript"
 	"SR-Player/internal/artwork"
 	"SR-Player/internal/cava"
 	"SR-Player/internal/config"
 	"SR-Player/internal/models"
 	"SR-Player/internal/ui/panels"
+	"SR-Player/internal/ui/theme"
 )
 
 type tickMsg time.Time
@@ -31,12 +32,14 @@ type configSavedMsg struct{ err error }
 
 type playlistsMsg []models.Playlist
 
-type contextTracksMsg struct {
-	contextType  string
-	contextValue string
-	offset       int
-	tracks       []models.Track
+type tracksMsg struct {
+	ctx    trackContext
+	tracks []models.Track
+	err    error
 }
+
+// previewMsg loads the selection of a list, unless it moved meanwhile.
+type previewMsg struct{ seq int }
 
 type uniqueStringsMsg struct {
 	kind  string // "artists" or "albums"
@@ -56,68 +59,91 @@ type contextCountMsg struct {
 }
 
 type queueMsg []models.QueueTrack
-type searchResultsMsg []models.Track
 type visualizerMsg cava.Event
 
-// silenceNoticeAfter is how long a playing track may yield no audio before the
-// visualizer explains why it is empty.
-const silenceNoticeAfter = 5 * time.Second
-
-// noticeTicks is how long a status bar notice stays visible (~3 s).
-const noticeTicks = 20
-
-type focusedPanel int
-
 const (
-	focusSearchInput focusedPanel = iota
-	focusCenter
-	focusRight
+	// silenceNoticeAfter is how long a playing track may yield no audio before
+	// the visualizer explains why it is empty.
+	silenceNoticeAfter = 5 * time.Second
+
+	// noticeTicks is how long a notice stays in the bottom line (~3 s).
+	noticeTicks = 20
+
+	// searchAbove is the fraction of the free rows above the search popup: it
+	// looks too low in the exact middle.
+	searchAbove = 0.28
+
+	// previewDelay avoids asking Music for every row the cursor passes over.
+	previewDelay = 120 * time.Millisecond
 )
 
-type CenterView int
+// panel is a part of the screen that can be focused.
+type panel int
 
 const (
-	CenterContextTracks CenterView = iota
-	CenterSearchResults
-	CenterStringList
+	panelPlaylists panel = iota
+	panelArtists
+	panelAlbums
+	panelTracks
+	panelQueue
+	panelCount
 )
 
-type TopTab int
+type popup int
 
 const (
-	TabAlbums TopTab = iota
-	TabArtists
-	TabSongs
-	TabPlaylists
-	TabSearch
+	popupNone popup = iota
+	popupSearch
+	popupHelp
 )
+
+const (
+	kindLibrary  = "library"
+	kindPlaylist = "playlist"
+	kindArtist   = "artist"
+	kindAlbum    = "album"
+	kindSearch   = "search"
+)
+
+// trackContext identifies the contents of the tracks panel.
+type trackContext struct{ kind, value string }
+
+func (c trackContext) title() string {
+	switch c.kind {
+	case kindLibrary:
+		return "All Songs"
+	case kindSearch:
+		return "Search: " + c.value
+	default:
+		return strings.TrimSpace(c.value)
+	}
+}
 
 type App struct {
-	trackListPanel  panels.TrackListPanel
-	stringListPanel panels.StringListPanel
+	sides           [sideLists]panels.SideList
+	tracks          panels.TrackList
+	queue           panels.QueuePanel
 	nowPlayingPanel panels.NowPlayingPanel
-	queuePanel      panels.QueuePanel
-	searchPanel     panels.SearchPanel
-	statusBar       StatusBar
+	search          panels.SearchPrompt
+	help            panels.Help
 	layout          Layout
+	cache           *viewCache
 
-	nowPlaying             models.NowPlaying
-	lastTrackName          string
-	rightView              RightView
-	centerView             CenterView
-	focus                  focusedPanel
-	activeTopTab           TopTab
-	playlists              []models.Playlist
-	tick                   int
-	width                  int
-	height                 int
-	centerTracksHeight     int
-	centerVisualizerHeight int
+	width, height int
+	tick          int
+	focus         panel
+	activeSide    panel // last focused list on the left
+	popup         popup
+	notice        string
+	noticeUntil   int // tick that hides the notice
 
-	currentContextType  string
-	currentContextValue string
-	currentContextTotal int
-	fetchingTracks      bool
+	nowPlaying models.NowPlaying
+	lastTrack  models.Track
+
+	context    trackContext // shown in the tracks panel
+	loaded     bool         // the tracks of context have arrived
+	trackCache map[trackContext][]models.Track
+	previewSeq int
 
 	playbackContextType  string
 	playbackContextValue string
@@ -136,54 +162,41 @@ type App struct {
 	imagesSupported bool
 	imageID         uint32 // image in the terminal, 0 if none
 	imagePath       string // artwork uploaded, or being uploaded
-	noticeUntil     int    // tick that hides the status bar notice
 }
 
 // NewApp creates the app. imagesSupported tells whether the terminal can show
 // real images (see artwork.Supported).
 func NewApp(width, height int, cfg config.Config, imagesSupported bool) App {
-	tmpLayout := NewLayout(width, height)
-	centerW, rightW, mainH := tmpLayout.PanelSizes()
-	centerTracksH, centerVisH := splitCenterHeights(mainH)
-
 	app := App{
-		trackListPanel:  panels.NewTrackListPanel(centerW, centerTracksH),
-		stringListPanel: panels.NewStringListPanel(centerW, mainH, "Library"),
-		nowPlayingPanel: panels.NewNowPlayingPanel(rightW, mainH),
-		queuePanel:      panels.NewQueuePanel(rightW, mainH),
-		searchPanel:     panels.NewSearchPanel(width, mainH),
-		statusBar:       NewStatusBar(width),
-		layout:          tmpLayout,
-		rightView:       ViewNowPlaying,
-		centerView:      CenterContextTracks,
-		focus:           focusCenter,
-		activeTopTab:    TabSongs,
+		sides: [sideLists]panels.SideList{
+			panels.NewSideList("1", "Playlists"),
+			panels.NewSideList("2", "Artists"),
+			panels.NewSideList("3", "Albums"),
+		},
+		tracks:          panels.NewTrackList(),
+		queue:           panels.NewQueuePanel(),
+		nowPlayingPanel: panels.NewNowPlayingPanel(),
+		search:          panels.NewSearchPrompt(),
+		help:            panels.NewHelp(helpBindings),
+		cache:           &viewCache{},
 		width:           width,
 		height:          height,
-
-		centerTracksHeight:     centerTracksH,
-		centerVisualizerHeight: centerVisH,
-		currentContextType:     "library",
-		currentContextValue:    "",
-		currentContextTotal:    0,
-
-		visualizer: cava.New(),
-		visHeardAt: time.Now(),
-
+		trackCache:      map[trackContext][]models.Track{},
+		visualizer:      cava.New(),
+		visHeardAt:      time.Now(),
 		config:          cfg,
 		imagesSupported: imagesSupported,
 	}
-	app.updateFocusStyles()
+	app.context = trackContext{kind: kindLibrary}
+	app.tracks.SetLoading(kindLibrary, app.context.title())
+	app.setPlaylists(nil)
+	app.relayout()
 	return app
 }
 
 // Close releases the resources held by the app (the cava child process).
 func (a App) Close() {
 	a.visualizer.Close()
-}
-
-func (a App) visualizerVisible() bool {
-	return a.centerView == CenterContextTracks && a.centerVisualizerHeight > 0
 }
 
 func (a App) isPlaying() bool {
@@ -293,234 +306,165 @@ func (a *App) toggleArtwork() tea.Cmd {
 }
 
 func (a *App) setNotice(text string) {
-	a.statusBar.SetNotice(text)
+	a.notice = text
 	a.noticeUntil = a.tick + noticeTicks
 }
 
-func splitCenterHeights(mainH int) (tracksH, visH int) {
-	if mainH <= 11 {
-		return mainH, 0
-	}
-
-	visH = mainH / 3
-	if visH < 6 {
-		visH = 6
-	}
-	if visH > 14 {
-		visH = 14
-	}
-
-	tracksH = mainH - visH
-	if tracksH < 6 {
-		tracksH = 6
-		visH = mainH - tracksH
-	}
-	if visH < 4 {
-		visH = 4
-		tracksH = mainH - visH
-	}
-	if tracksH < 1 {
-		tracksH = mainH
-		visH = 0
-	}
-
-	return
+func (a App) visualizerVisible() bool {
+	return a.layout.visH > 0 && !a.queueInMain() && !a.layout.tooSmall()
 }
 
-func tickCmd() tea.Cmd {
-	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
-		return tickMsg(t)
+// queueInMain reports whether Up Next replaces the tracks panel.
+func (a App) queueInMain() bool {
+	return !a.layout.wide() && a.focus == panelQueue
+}
+
+// relayout recomputes the size and state of every panel.
+func (a *App) relayout() {
+	a.layout = newLayout(a.width, a.height, int(a.activeSide), a.sides[panelPlaylists].Len())
+	for i := range a.sides {
+		a.sides[i].SetSize(a.layout.leftW, a.layout.sideH[i])
+		a.sides[i].SetState(a.focus == panel(i), a.activeSide == panel(i) && a.context.kind != kindSearch)
+	}
+	a.tracks.SetSize(a.layout.mainW, a.layout.tracksH)
+	a.tracks.SetFocused(a.focus == panelTracks)
+	a.queue.SetSize(a.layout.queueSize())
+	a.queue.SetFocused(a.focus == panelQueue)
+	if a.layout.wide() {
+		a.nowPlayingPanel.SetSize(a.layout.rightW, a.layout.nowPlayingH)
+	}
+}
+
+// focusPanel moves the focus; focusing a list shows its selection.
+func (a *App) focusPanel(p panel) tea.Cmd {
+	a.focus = p
+	var cmd tea.Cmd
+	if p < sideLists {
+		a.activeSide = p
+		cmd = a.preview()
+	}
+	a.relayout()
+	return cmd
+}
+
+// setPlaylists fills the first list, which starts with the whole library.
+func (a *App) setPlaylists(playlists []models.Playlist) {
+	songs := panels.SideItem{Label: "All Songs"}
+	if tracks, ok := a.trackCache[trackContext{kind: kindLibrary}]; ok {
+		songs.Count = len(tracks)
+	}
+	items := []panels.SideItem{songs}
+	for _, pl := range playlists {
+		if pl.Name != "" {
+			items = append(items, panels.SideItem{Label: strings.TrimSpace(pl.Name), Value: pl.Name, Count: pl.Count})
+		}
+	}
+	a.sides[panelPlaylists].SetItems(items)
+}
+
+func sideItems(values []string) []panels.SideItem {
+	items := make([]panels.SideItem, len(values))
+	for i, v := range values {
+		items[i] = panels.SideItem{Label: strings.TrimSpace(v), Value: v}
+	}
+	slices.SortStableFunc(items, func(a, b panels.SideItem) int {
+		return strings.Compare(strings.ToLower(a.Label), strings.ToLower(b.Label))
 	})
+	return items
 }
 
-func (a App) waitVisualizer() tea.Cmd {
-	events := a.visualizer.Events()
-	return func() tea.Msg {
-		return visualizerMsg(<-events)
+// selectedContext returns the context of the active list's selection.
+func (a *App) selectedContext() (trackContext, bool) {
+	it := a.sides[a.activeSide].Selected()
+	if it == nil {
+		return trackContext{}, false
 	}
-}
-
-func fetchNowPlaying() tea.Cmd {
-	return func() tea.Msg {
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
-}
-
-func fetchPlaylists() tea.Cmd {
-	return func() tea.Msg {
-		pl, _ := applescript.GetPlaylists()
-		return playlistsMsg(pl)
-	}
-}
-
-func fetchArtwork() tea.Cmd {
-	return func() tea.Msg {
-		path := applescript.GetArtworkPath()
-		return artworkMsg(path)
-	}
-}
-
-func fetchQueue() tea.Cmd {
-	return func() tea.Msg {
-		tracks, _ := applescript.GetQueueTracks()
-		return queueMsg(tracks)
-	}
-}
-
-func fetchContextQueue(cType, cVal string, currentIndex int) tea.Cmd {
-	return func() tea.Msg {
-		tracks, _ := applescript.GetQueueTracksForContext(cType, cVal, currentIndex, 10)
-		return queueMsg(tracks)
-	}
-}
-
-func fetchUniqueStrings(kind string) tea.Cmd {
-	return func() tea.Msg {
-		var items []string
-		if kind == "artists" {
-			items, _ = applescript.GetUniqueArtists()
-		} else if kind == "albums" {
-			items, _ = applescript.GetUniqueAlbums()
+	switch a.activeSide {
+	case panelArtists:
+		return trackContext{kindArtist, it.Value}, true
+	case panelAlbums:
+		return trackContext{kindAlbum, it.Value}, true
+	default:
+		if it.Value == "" {
+			return trackContext{kind: kindLibrary}, true
 		}
-		return uniqueStringsMsg{kind: kind, items: items}
+		return trackContext{kindPlaylist, it.Value}, true
 	}
 }
 
-func fetchContextTracks(cType, cVal string, offset, limit int) tea.Cmd {
-	return func() tea.Msg {
-		tracks, _ := applescript.GetFilteredTracks(cType, cVal, offset, limit)
-		return contextTracksMsg{contextType: cType, contextValue: cVal, offset: offset, tracks: tracks}
+// preview shows the active list's selection, after a short delay when its
+// tracks have to be fetched.
+func (a *App) preview() tea.Cmd {
+	a.previewSeq++
+	ctx, ok := a.selectedContext()
+	if !ok || ctx == a.context {
+		return nil
 	}
+	if _, cached := a.trackCache[ctx]; cached {
+		return a.showContext(ctx)
+	}
+	seq := a.previewSeq
+	return tea.Tick(previewDelay, func(time.Time) tea.Msg { return previewMsg{seq} })
 }
 
-func fetchContextCount(cType, cVal string) tea.Cmd {
-	return func() tea.Msg {
-		count, _ := applescript.GetContextTrackCount(cType, cVal)
-		return contextCountMsg{contextType: cType, contextValue: cVal, count: count}
+// showContext shows ctx in the tracks panel, fetching its tracks if needed.
+func (a *App) showContext(ctx trackContext) tea.Cmd {
+	a.previewSeq++ // whatever was waiting is superseded
+	if ctx == a.context && a.loaded {
+		return nil
 	}
+	a.context = ctx
+	if tracks, ok := a.trackCache[ctx]; ok {
+		a.loaded = true
+		a.tracks.SetTracks(ctx.kind, ctx.title(), tracks, "No tracks")
+		a.relayout()
+		return nil
+	}
+	a.loaded = false
+	a.tracks.SetLoading(ctx.kind, ctx.title())
+	a.relayout()
+	if ctx.kind == kindSearch {
+		return searchLibrary(ctx.value)
+	}
+	return fetchTracks(ctx)
 }
 
-func searchLibrary(query string) tea.Cmd {
-	return func() tea.Msg {
-		results, _ := applescript.SearchLibrary(query)
-		return searchResultsMsg(results)
-	}
-}
-
-func fetchPlaybackIndex(cType, cVal string, track models.Track) tea.Cmd {
-	return func() tea.Msg {
-		idx, _ := applescript.FindTrackIndexInContext(cType, cVal, track)
-		return playbackIndexMsg{
-			contextType:  cType,
-			contextValue: cVal,
-			index:        idx,
+func (a *App) receiveTracks(msg tracksMsg) {
+	if msg.err == nil && msg.ctx.kind != kindSearch {
+		a.trackCache[msg.ctx] = msg.tracks
+		if msg.ctx.kind == kindLibrary {
+			a.setLibraryCount(len(msg.tracks))
 		}
 	}
+	if msg.ctx != a.context || a.loaded {
+		return
+	}
+	empty := "No tracks"
+	switch {
+	case msg.err != nil:
+		empty = "Music did not answer - press R to retry"
+	case msg.ctx.kind == kindSearch:
+		empty = fmt.Sprintf("Nothing found for %q", msg.ctx.value)
+	}
+	a.loaded = true
+	a.tracks.SetTracks(msg.ctx.kind, msg.ctx.title(), msg.tracks, empty)
 }
 
-func doPlayPause() tea.Cmd {
-	return func() tea.Msg {
-		_ = applescript.PlayPause()
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
+func (a *App) setLibraryCount(count int) {
+	a.sides[panelPlaylists].SetCount("", count)
 }
 
-func doNext() tea.Cmd {
-	return func() tea.Msg {
-		_ = applescript.NextTrack()
-		time.Sleep(300 * time.Millisecond)
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
+// refresh forgets what is known about the library and asks for it again.
+func (a *App) refresh() tea.Cmd {
+	a.setNotice("Refreshing library…")
+	clear(a.trackCache)
+	a.loaded = false
+	a.tracks.SetLoading(a.context.kind, a.context.title())
+	fetch := fetchTracks(a.context)
+	if a.context.kind == kindSearch {
+		fetch = searchLibrary(a.context.value)
 	}
-}
-
-func doPrev() tea.Cmd {
-	return func() tea.Msg {
-		_ = applescript.PreviousTrack()
-		time.Sleep(300 * time.Millisecond)
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
-}
-
-func doToggleShuffle() tea.Cmd {
-	return func() tea.Msg {
-		_ = applescript.ToggleShuffle()
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
-}
-
-func doSetShuffle(enabled bool) tea.Cmd {
-	return func() tea.Msg {
-		_ = applescript.SetShuffle(enabled)
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
-}
-
-func doToggleRepeat() tea.Cmd {
-	return func() tea.Msg {
-		_ = applescript.ToggleRepeat()
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
-}
-
-func doSeek(delta float64, current float64) tea.Cmd {
-	return func() tea.Msg {
-		pos := current + delta
-		if pos < 0 {
-			pos = 0
-		}
-		_ = applescript.SetPlayerPosition(pos)
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
-}
-
-func doPlayTrackInContext(cType, cVal string, index int, shuffleAfter bool) tea.Cmd {
-	return func() tea.Msg {
-		_ = applescript.PlayTrackInContextWithShuffle(cType, cVal, index, shuffleAfter)
-		time.Sleep(400 * time.Millisecond)
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
-}
-
-func doPlayTrack(name string) tea.Cmd {
-	return func() tea.Msg {
-		_ = applescript.PlayTrackByName(name)
-		time.Sleep(300 * time.Millisecond)
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
-}
-
-func doPlayLibraryTrack(track models.Track) tea.Cmd {
-	return func() tea.Msg {
-		_ = applescript.PlayTrackInLibrary(track)
-		time.Sleep(300 * time.Millisecond)
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
-}
-
-func doChangeVolume(delta int, current int) tea.Cmd {
-	return func() tea.Msg {
-		newVol := current + delta
-		if newVol < 0 {
-			newVol = 0
-		}
-		if newVol > 100 {
-			newVol = 100
-		}
-		_ = applescript.SetVolume(newVol)
-		np, _ := applescript.GetNowPlaying()
-		return nowPlayingMsg(np)
-	}
+	return tea.Batch(fetch, fetchPlaylists(), fetchUniqueStrings("artists"), fetchUniqueStrings("albums"))
 }
 
 func (a App) Init() tea.Cmd {
@@ -529,261 +473,11 @@ func (a App) Init() tea.Cmd {
 		a.waitVisualizer(),
 		fetchNowPlaying(),
 		fetchPlaylists(),
-		fetchContextTracks("library", "", 0, 30),
-		fetchContextCount("library", ""),
+		fetchUniqueStrings("artists"),
+		fetchUniqueStrings("albums"),
+		fetchTracks(a.context),
+		a.queueFetchCmd(),
 	)
-}
-
-func (a *App) topTabFromKey(key string) (TopTab, bool) {
-	switch key {
-	case "1":
-		return TabAlbums, true
-	case "2":
-		return TabArtists, true
-	case "3":
-		return TabSongs, true
-	case "4":
-		return TabPlaylists, true
-	case "5":
-		return TabSearch, true
-	default:
-		return TabSongs, false
-	}
-}
-
-func (a *App) playlistsAsStrings() []string {
-	items := make([]string, 0, len(a.playlists))
-	for _, pl := range a.playlists {
-		if pl.Name != "" {
-			items = append(items, pl.Name)
-		}
-	}
-	return items
-}
-
-func (a *App) refreshPlaylistList() {
-	items := a.playlistsAsStrings()
-	if len(items) == 0 {
-		a.stringListPanel.SetItems([]string{"No playlists"}, "Playlists")
-		return
-	}
-	a.stringListPanel.SetItems(items, "Playlists")
-}
-
-func (a *App) setPlaybackContext(contextType, contextValue string, index, count int) {
-	a.playbackContextType = contextType
-	a.playbackContextValue = contextValue
-	a.playbackTrackIndex = index
-	if count > 0 {
-		a.playbackContextCount = count
-	} else {
-		a.playbackContextCount = 0
-	}
-	if a.playbackShuffleOn {
-		a.rebuildPlaybackOrder(index)
-	} else {
-		a.playbackOrder = nil
-		a.playbackOrderPos = 0
-	}
-}
-
-func (a App) hasContextualPlayback() bool {
-	return a.playbackContextType != "" && a.playbackTrackIndex > 0
-}
-
-func (a App) queueFetchCmd() tea.Cmd {
-	if a.hasContextualPlayback() {
-		return fetchContextQueue(a.playbackContextType, a.playbackContextValue, a.playbackTrackIndex)
-	}
-	return fetchQueue()
-}
-
-func (a App) nextCmd() tea.Cmd {
-	if a.hasContextualPlayback() {
-		if a.playbackShuffleOn && len(a.playbackOrder) > 0 {
-			nextPos := a.playbackOrderPos + 1
-			if nextPos >= len(a.playbackOrder) {
-				nextPos = len(a.playbackOrder) - 1
-			}
-			if nextPos >= 0 && nextPos < len(a.playbackOrder) {
-				return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, a.playbackOrder[nextPos], true)
-			}
-		}
-		return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, a.playbackTrackIndex+1, false)
-	}
-	return doNext()
-}
-
-func (a App) prevCmd() tea.Cmd {
-	if a.hasContextualPlayback() {
-		if a.playbackShuffleOn && len(a.playbackOrder) > 0 {
-			targetPos := a.playbackOrderPos - 1
-			if targetPos < 0 {
-				targetPos = 0
-			}
-			if targetPos < len(a.playbackOrder) {
-				return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, a.playbackOrder[targetPos], true)
-			}
-		}
-		targetIndex := a.playbackTrackIndex - 1
-		if targetIndex < 1 {
-			targetIndex = 1
-		}
-		return doPlayTrackInContext(a.playbackContextType, a.playbackContextValue, targetIndex, false)
-	}
-	return doPrev()
-}
-
-func (a *App) switchTopTab(tab TopTab) []tea.Cmd {
-	a.activeTopTab = tab
-
-	if a.focus == focusSearchInput && tab != TabSearch {
-		a.focus = focusCenter
-	}
-
-	var cmds []tea.Cmd
-	switch tab {
-	case TabAlbums:
-		a.centerView = CenterStringList
-		a.currentContextType = ""
-		a.currentContextValue = ""
-		a.stringListPanel.SetItems([]string{"Loading..."}, "Albums")
-		cmds = append(cmds, fetchUniqueStrings("albums"))
-
-	case TabArtists:
-		a.centerView = CenterStringList
-		a.currentContextType = ""
-		a.currentContextValue = ""
-		a.stringListPanel.SetItems([]string{"Loading..."}, "Artists")
-		cmds = append(cmds, fetchUniqueStrings("artists"))
-
-	case TabSongs:
-		a.centerView = CenterContextTracks
-		a.currentContextType = "library"
-		a.currentContextValue = ""
-		a.currentContextTotal = 0
-		a.fetchingTracks = true
-		a.trackListPanel.SetTracks("Songs", []models.Track{}, a.nowPlaying.Track.Name)
-		cmds = append(cmds, fetchContextTracks("library", "", 0, 30), fetchContextCount("library", ""))
-
-	case TabPlaylists:
-		a.centerView = CenterStringList
-		a.currentContextType = ""
-		a.currentContextValue = ""
-		if len(a.playlists) == 0 {
-			a.stringListPanel.SetItems([]string{"Loading..."}, "Playlists")
-			cmds = append(cmds, fetchPlaylists())
-		} else {
-			a.refreshPlaylistList()
-		}
-
-	case TabSearch:
-		a.centerView = CenterSearchResults
-		a.focus = focusSearchInput
-	}
-
-	a.updateFocusStyles()
-	return cmds
-}
-
-func nextTopTab(tab TopTab) TopTab {
-	return TopTab((int(tab) + 1) % 5)
-}
-
-func prevTopTab(tab TopTab) TopTab {
-	return TopTab((int(tab) + 4) % 5)
-}
-
-func (a *App) openTracksForSelectedString() []tea.Cmd {
-	selectedStr := a.stringListPanel.SelectedItem()
-	if selectedStr == "" || selectedStr == "Loading..." || selectedStr == "No playlists" {
-		return nil
-	}
-
-	cType := ""
-	switch a.activeTopTab {
-	case TabArtists:
-		cType = "artist"
-	case TabAlbums:
-		cType = "album"
-	case TabPlaylists:
-		cType = "playlist"
-	default:
-		return nil
-	}
-
-	a.centerView = CenterContextTracks
-	a.currentContextType = cType
-	a.currentContextValue = selectedStr
-	a.currentContextTotal = 0
-	a.fetchingTracks = true
-	a.trackListPanel.SetTracks("Loading...", []models.Track{}, "")
-	a.updateFocusStyles()
-
-	return []tea.Cmd{fetchContextTracks(cType, selectedStr, 0, 30), fetchContextCount(cType, selectedStr)}
-}
-
-func (a *App) rebuildPlaybackOrder(currentIndex int) {
-	if !a.playbackShuffleOn || a.playbackContextCount < 1 || currentIndex < 1 {
-		a.playbackOrder = nil
-		a.playbackOrderPos = 0
-		return
-	}
-
-	order := make([]int, 0, a.playbackContextCount)
-	order = append(order, currentIndex)
-	for i := 1; i <= a.playbackContextCount; i++ {
-		if i != currentIndex {
-			order = append(order, i)
-		}
-	}
-
-	if len(order) > 1 {
-		r := rand.New(rand.NewSource(time.Now().UnixNano()))
-		r.Shuffle(len(order)-1, func(i, j int) {
-			i++
-			j++
-			order[i], order[j] = order[j], order[i]
-		})
-	}
-
-	a.playbackOrder = order
-	a.playbackOrderPos = 0
-}
-
-func (a *App) syncPlaybackPosition(index int) {
-	a.playbackTrackIndex = index
-	if !a.playbackShuffleOn {
-		return
-	}
-	for pos, trackIndex := range a.playbackOrder {
-		if trackIndex == index {
-			a.playbackOrderPos = pos
-			return
-		}
-	}
-	a.rebuildPlaybackOrder(index)
-}
-
-func (a *App) toggleContextShuffle() tea.Cmd {
-	a.playbackShuffleOn = !a.playbackShuffleOn
-	if a.playbackShuffleOn {
-		a.rebuildPlaybackOrder(a.playbackTrackIndex)
-	} else {
-		a.playbackOrder = nil
-		a.playbackOrderPos = 0
-	}
-	a.nowPlaying.ShuffleEnabled = a.playbackShuffleOn
-	a.nowPlayingPanel.SetNowPlaying(a.nowPlaying)
-
-	cmds := []tea.Cmd{doSetShuffle(a.playbackShuffleOn)}
-	if a.playbackShuffleOn && a.playbackContextCount == 0 {
-		cmds = append(cmds, fetchContextCount(a.playbackContextType, a.playbackContextValue))
-	}
-	if a.rightView == ViewQueue {
-		cmds = append(cmds, a.queueFetchCmd())
-	}
-	return tea.Batch(cmds...)
 }
 
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -791,20 +485,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		a.width = msg.Width
-		a.height = msg.Height
-		a.layout.SetSize(msg.Width, msg.Height)
-
-		centerW, rightW, mainH := a.layout.PanelSizes()
-		centerTracksH, centerVisH := splitCenterHeights(mainH)
-		a.centerTracksHeight = centerTracksH
-		a.centerVisualizerHeight = centerVisH
-		a.trackListPanel.SetSize(centerW, centerTracksH)
-		a.stringListPanel.SetSize(centerW, mainH)
-		a.nowPlayingPanel.SetSize(rightW, mainH)
-		a.queuePanel.SetSize(rightW, mainH)
-		a.statusBar.SetWidth(msg.Width)
-		a.visualizer.Resize(panels.VisualizerBars(centerW))
+		a.width, a.height = msg.Width, msg.Height
+		a.relayout()
+		a.visualizer.Resize(panels.VisualizerBars(a.layout.mainW))
 
 	case visualizerMsg:
 		a.updateVisualizer(cava.Event(msg))
@@ -813,7 +496,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		a.tick++
 		if a.tick >= a.noticeUntil {
-			a.statusBar.SetNotice("")
+			a.notice = ""
 		}
 		cmds = append(cmds, tickCmd())
 
@@ -824,39 +507,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if a.tick%6 == 0 {
 			cmds = append(cmds, fetchNowPlaying())
-			if a.rightView == ViewQueue {
-				cmds = append(cmds, a.queueFetchCmd())
-			}
 		}
-
-		if a.centerView == CenterContextTracks {
-			a.trackListPanel.SetCurrentTrack(a.nowPlaying.Track.Name)
+		// Also refreshed when the track changes.
+		if a.tick%40 == 0 {
+			cmds = append(cmds, a.queueFetchCmd())
 		}
 
 	case nowPlayingMsg:
-		prevTrack := a.nowPlaying.Track
-		fresh := models.NowPlaying(msg)
-		if a.playbackContextType != "" {
-			fresh.ShuffleEnabled = a.playbackShuffleOn
-		}
-		fresh.ArtworkPath = a.nowPlaying.ArtworkPath
-		a.nowPlaying = fresh
-		a.nowPlayingPanel.SetNowPlaying(a.nowPlaying)
-
-		if a.nowPlaying.Track.Name != a.lastTrackName {
-			a.lastTrackName = a.nowPlaying.Track.Name
-			a.nowPlaying.ArtworkPath = ""
-			a.nowPlayingPanel.SetNowPlaying(a.nowPlaying)
-			cmds = append(cmds, a.syncImage(), fetchArtwork())
-		}
-
-		if a.playbackContextType != "" &&
-			(a.nowPlaying.Track.Name != prevTrack.Name ||
-				a.nowPlaying.Track.Artist != prevTrack.Artist ||
-				a.nowPlaying.Track.Album != prevTrack.Album) &&
-			a.nowPlaying.Track.Name != "" {
-			cmds = append(cmds, fetchPlaybackIndex(a.playbackContextType, a.playbackContextValue, a.nowPlaying.Track))
-		}
+		cmds = append(cmds, a.receiveNowPlaying(models.NowPlaying(msg))...)
 
 	case artworkMsg:
 		a.nowPlaying.ArtworkPath = string(msg)
@@ -872,295 +530,161 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case playlistsMsg:
-		a.playlists = []models.Playlist(msg)
-		if a.activeTopTab == TabPlaylists && a.centerView == CenterStringList {
-			a.refreshPlaylistList()
-		}
+		a.setPlaylists(msg)
+		a.relayout()
 
 	case uniqueStringsMsg:
-		title := "Artists"
+		side := panelArtists
 		if msg.kind == "albums" {
-			title = "Albums"
+			side = panelAlbums
 		}
-		a.stringListPanel.SetItems(msg.items, title)
+		a.sides[side].SetItems(sideItems(msg.items))
+		if a.focus == side {
+			cmds = append(cmds, a.preview())
+		}
+
+	case previewMsg:
+		if ctx, ok := a.selectedContext(); ok && msg.seq == a.previewSeq {
+			cmds = append(cmds, a.showContext(ctx))
+		}
+
+	case tracksMsg:
+		a.receiveTracks(msg)
 
 	case contextCountMsg:
-		if msg.contextType == a.currentContextType && msg.contextValue == a.currentContextValue {
-			a.currentContextTotal = msg.count
-		}
 		if msg.contextType == a.playbackContextType && msg.contextValue == a.playbackContextValue {
 			a.playbackContextCount = msg.count
 			if a.playbackShuffleOn {
 				a.rebuildPlaybackOrder(a.playbackTrackIndex)
-				if a.rightView == ViewQueue {
-					cmds = append(cmds, a.queueFetchCmd())
-				}
+				cmds = append(cmds, a.queueFetchCmd())
 			}
 		}
 
 	case playbackIndexMsg:
 		if msg.contextType == a.playbackContextType && msg.contextValue == a.playbackContextValue {
 			a.syncPlaybackPosition(msg.index)
-			if a.rightView == ViewQueue {
-				cmds = append(cmds, a.queueFetchCmd())
-			}
-		}
-
-	case contextTracksMsg:
-		a.fetchingTracks = false
-		if msg.contextType == a.currentContextType && msg.contextValue == a.currentContextValue {
-			if msg.offset == 0 {
-				title := msg.contextValue
-				if msg.contextType == "library" {
-					title = "Songs"
-				}
-				a.trackListPanel.SetTracks(title, msg.tracks, a.nowPlaying.Track.Name)
-			} else {
-				cmd := a.trackListPanel.AppendTracks(msg.tracks)
-				cmds = append(cmds, cmd)
-			}
+			cmds = append(cmds, a.queueFetchCmd())
 		}
 
 	case queueMsg:
-		a.queuePanel.SetTracks([]models.QueueTrack(msg))
-
-	case searchResultsMsg:
-		a.searchPanel.SetResults([]models.Track(msg))
+		a.queue.SetTracks(msg)
 
 	case tea.KeyMsg:
-		if a.focus == focusSearchInput {
-			switch msg.String() {
-			case "esc":
-				a.focus = focusCenter
-				a.updateFocusStyles()
-			case "enter":
-				query := a.searchPanel.GetQuery()
-				if query != "" {
-					a.activeTopTab = TabSearch
-					a.centerView = CenterSearchResults
-					a.focus = focusCenter
-					a.updateFocusStyles()
-					cmds = append(cmds, searchLibrary(query))
-				}
-			default:
-				var cmd tea.Cmd
-				cmd, _ = a.searchPanel.Update(msg)
-				cmds = append(cmds, cmd)
-			}
-			break
-		}
+		// Not in the return statement: it would copy a before the key changes it.
+		cmds = append(cmds, a.handleKey(msg))
 
-		if tab, ok := a.topTabFromKey(msg.String()); ok {
-			cmds = append(cmds, a.switchTopTab(tab)...)
-			return a, tea.Batch(cmds...)
-		}
-
-		switch msg.String() {
-		case "q", "Q":
-			// Before leaving the alternate screen, which owns the image.
-			artwork.Delete(a.imageID)
-			return a, tea.Quit
-
-		case "/":
-			a.activeTopTab = TabSearch
-			a.centerView = CenterSearchResults
-			a.focus = focusSearchInput
-			a.updateFocusStyles()
-			return a, nil
-
-		case "z":
-			a.rightView = ViewNowPlaying
-			a.updateFocusStyles()
-
-		case "x":
-			a.rightView = ViewQueue
-			a.updateFocusStyles()
-			cmds = append(cmds, a.queueFetchCmd())
-
-		case "[":
-			cmds = append(cmds, a.switchTopTab(prevTopTab(a.activeTopTab))...)
-
-		case "]":
-			cmds = append(cmds, a.switchTopTab(nextTopTab(a.activeTopTab))...)
-
-		case " ":
-			cmds = append(cmds, doPlayPause())
-
-		case "n":
-			cmds = append(cmds, a.nextCmd())
-
-		case "p":
-			cmds = append(cmds, a.prevCmd())
-
-		case "s":
-			if a.hasContextualPlayback() {
-				cmds = append(cmds, a.toggleContextShuffle())
-			} else {
-				cmds = append(cmds, doToggleShuffle())
-			}
-
-		case "r":
-			cmds = append(cmds, doToggleRepeat())
-
-		case "i":
-			cmds = append(cmds, a.toggleArtwork())
-
-		case "+", "=":
-			cmds = append(cmds, doChangeVolume(5, a.nowPlaying.Volume))
-
-		case "-":
-			cmds = append(cmds, doChangeVolume(-5, a.nowPlaying.Volume))
-		case "left":
-			if a.focus == focusRight {
-				a.focus = focusCenter
-				a.updateFocusStyles()
-			} else if a.focus == focusCenter {
-				a.focus = focusSearchInput
-				a.updateFocusStyles()
-			} else {
-				cmds = append(cmds, doSeek(-10, a.nowPlaying.Position))
-			}
-
-		case "right":
-			if a.focus == focusSearchInput {
-				a.focus = focusCenter
-				a.updateFocusStyles()
-			} else if a.focus == focusCenter {
-				a.focus = focusRight
-				a.updateFocusStyles()
-			} else {
-				cmds = append(cmds, doSeek(10, a.nowPlaying.Position))
-			}
-
-		case "tab":
-			switch a.focus {
-			case focusSearchInput:
-				a.focus = focusCenter
-			case focusCenter:
-				a.focus = focusRight
-			case focusRight:
-				a.focus = focusSearchInput
-			}
-			a.updateFocusStyles()
-
-		case "esc":
-			if a.focus == focusRight {
-				a.focus = focusCenter
-				a.updateFocusStyles()
-			} else if a.focus == focusCenter && a.centerView == CenterContextTracks {
-				if a.activeTopTab == TabArtists || a.activeTopTab == TabAlbums || a.activeTopTab == TabPlaylists {
-					cmds = append(cmds, a.switchTopTab(a.activeTopTab)...)
-				}
-			}
-
-		case "enter":
-			if a.focus == focusCenter {
-				if a.centerView == CenterContextTracks {
-					idx := a.trackListPanel.SelectedTrackIndex()
-					if idx > 0 && a.currentContextType != "" {
-						a.setPlaybackContext(a.currentContextType, a.currentContextValue, idx, a.currentContextTotal)
-						cmds = append(cmds, doPlayTrackInContext(a.currentContextType, a.currentContextValue, idx, a.playbackShuffleOn))
-					}
-				} else if a.centerView == CenterSearchResults {
-					track := a.searchPanel.SelectedTrack()
-					if track != nil {
-						a.setPlaybackContext("library", "", 0, a.currentContextTotal)
-						cmds = append(cmds, doPlayLibraryTrack(*track))
-						cmds = append(cmds, fetchPlaybackIndex("library", "", *track))
-						a.rightView = ViewNowPlaying
-						a.updateFocusStyles()
-					}
-				} else if a.centerView == CenterStringList {
-					cmds = append(cmds, a.openTracksForSelectedString()...)
-				}
-			}
-
-		default:
-			switch a.focus {
-			case focusCenter:
-				if a.centerView == CenterContextTracks {
-					cmd := a.trackListPanel.Update(msg)
-					cmds = append(cmds, cmd)
-
-					idx := a.trackListPanel.SelectedTrackIndex()
-					loaded := len(a.trackListPanel.GetTracks())
-					if idx >= loaded-10 && (a.currentContextTotal == 0 || loaded < a.currentContextTotal) && !a.fetchingTracks {
-						a.fetchingTracks = true
-						cmds = append(cmds, fetchContextTracks(a.currentContextType, a.currentContextValue, loaded, 30))
-					}
-				} else if a.centerView == CenterSearchResults {
-					cmd, _ := a.searchPanel.Update(msg)
-					cmds = append(cmds, cmd)
-				} else if a.centerView == CenterStringList {
-					cmd := a.stringListPanel.Update(msg)
-					cmds = append(cmds, cmd)
-				}
-			case focusRight:
-				if a.rightView == ViewQueue {
-					cmd := a.queuePanel.Update(msg)
-					cmds = append(cmds, cmd)
-				}
-			}
+	default:
+		if a.popup == popupSearch { // cursor blink
+			cmds = append(cmds, a.search.Update(msg))
 		}
 	}
 
 	return a, tea.Batch(cmds...)
 }
 
-func (a *App) updateFocusStyles() {
-	a.searchPanel.SetFocused(a.focus == focusSearchInput)
-	a.trackListPanel.SetFocused(a.focus == focusCenter && a.centerView == CenterContextTracks)
-	a.stringListPanel.SetFocused(a.focus == focusCenter && a.centerView == CenterStringList)
-	a.nowPlayingPanel.SetFocused(a.focus == focusRight && a.rightView == ViewNowPlaying)
-	a.queuePanel.SetFocused(a.focus == focusRight && a.rightView == ViewQueue)
+func (a *App) receiveNowPlaying(fresh models.NowPlaying) []tea.Cmd {
+	if a.playbackContextType != "" {
+		fresh.ShuffleEnabled = a.playbackShuffleOn
+	}
+	fresh.ArtworkPath = a.nowPlaying.ArtworkPath
+
+	prev := a.lastTrack
+	track := fresh.Track
+	changed := track.Name != prev.Name || track.Artist != prev.Artist || track.Album != prev.Album
+	if changed {
+		fresh.ArtworkPath = ""
+	}
+	a.lastTrack = track
+	a.nowPlaying = fresh
+	a.nowPlayingPanel.SetNowPlaying(fresh)
+	a.tracks.SetCurrent(track)
+	if !changed {
+		return nil
+	}
+
+	cmds := []tea.Cmd{a.syncImage(), fetchArtwork()}
+	if a.playbackContextType != "" && track.Name != "" {
+		// The queue follows once the position is known.
+		return append(cmds, fetchPlaybackIndex(a.playbackContextType, a.playbackContextValue, track))
+	}
+	return append(cmds, a.queueFetchCmd())
 }
 
 func (a App) View() string {
 	if a.width == 0 || a.height == 0 {
 		return "Loading..."
 	}
-
-	topView := renderTopBar(a.width, a.activeTopTab, a.tick)
-
-	centerW, _, mainH := a.layout.PanelSizes()
-
-	var centerView string
-	if a.centerView == CenterContextTracks {
-		centerView = a.trackListPanel.View()
-		if a.centerVisualizerHeight > 0 {
-			visView := panels.RenderVisualizerPanel(
-				centerW,
-				a.centerVisualizerHeight,
-				a.visLevels,
-				a.visualizerNotice(),
-				a.focus == focusCenter,
-			)
-			centerView = lipgloss.JoinVertical(lipgloss.Left, centerView, visView)
-		}
-	} else if a.centerView == CenterStringList {
-		centerView = a.stringListPanel.View()
-	} else {
-		inputH := 3
-		resultsH := mainH - inputH
-		if resultsH < 6 {
-			resultsH = 6
-		}
-		searchInput := a.searchPanel.ViewInput(centerW, a.focus == focusSearchInput)
-		searchResults := a.searchPanel.ViewResults(centerW, resultsH, a.focus == focusCenter)
-		centerView = lipgloss.JoinVertical(lipgloss.Left, searchInput, searchResults)
+	if a.layout.tooSmall() {
+		text := theme.Dim.Render(fmt.Sprintf("Terminal too small (needs %dx%d)", minWidth, minHeight))
+		lines := fitLines("", a.width, a.height)
+		lines[a.height/2] = panels.Center(text, a.width)
+		return strings.Join(lines, "\n")
 	}
 
-	rightView := a.nowPlayingPanel.View(a.tick)
-	if a.rightView == ViewQueue {
-		rightView = a.queuePanel.View()
+	lines := joinColumns(a.columns()...)
+	withTrack := !a.layout.wide()
+	lines = append(lines, a.fade(a.cache.player.get(playerKey{a.width, a.nowPlaying, withTrack}, func() []string {
+		return fitLines(renderPlayer(a.nowPlaying, a.width, withTrack), a.width, playerHeight)
+	}))...)
+	brandText := encryptedLabel(brand, a.tick)
+	lines = append(lines, a.fade(a.cache.bottom.get(bottomKey{a.width, a.focus, a.notice, brandText}, func() []string {
+		return fitLines(renderBottom(a.width, a.focus, a.notice, brandText), a.width, bottomHeight)
+	}))...)
+
+	switch a.popup {
+	case popupSearch:
+		return panels.Overlay(strings.Join(lines, "\n"), a.search.View(a.width), a.width, a.height, searchAbove)
+	case popupHelp:
+		return panels.Overlay(strings.Join(lines, "\n"), a.help.View(a.width, a.height), a.width, a.height, 0.5)
+	default:
+		return strings.Join(lines, "\n")
+	}
+}
+
+// fade takes the colors off lines while a popup is open.
+func (a App) fade(lines []string) []string {
+	if a.popup == popupNone {
+		return lines
+	}
+	return panels.Fade(lines)
+}
+
+// columns renders the body, from left to right.
+func (a App) columns() [][]string {
+	l := a.layout
+
+	var left []string
+	for i := range a.sides {
+		key := listKey{l.leftW, l.sideH[i], a.sides[i].Revision()}
+		left = append(left, a.cache.sides[i].get(key, func() []string {
+			return fitLines(a.sides[i].View(), l.leftW, l.sideH[i])
+		})...)
 	}
 
-	statusView := a.statusBar.View(a.nowPlaying)
+	queueW, queueH := l.queueSize()
+	queue := func() []string {
+		return a.cache.queue.get(listKey{queueW, queueH, a.queue.Revision()}, func() []string {
+			return fitLines(a.queue.View(), queueW, queueH)
+		})
+	}
+	if a.queueInMain() {
+		return [][]string{a.fade(left), a.fade(queue())}
+	}
 
-	return a.layout.Render(
-		topView,
-		centerView,
-		rightView,
-		statusView,
-	)
+	main := slices.Clone(a.cache.tracks.get(listKey{l.mainW, l.tracksH, a.tracks.Revision()}, func() []string {
+		return fitLines(a.tracks.View(), l.mainW, l.tracksH)
+	}))
+	if l.visH > 0 {
+		vis := panels.RenderVisualizerPanel(l.mainW, l.visH, a.visLevels, a.visualizerNotice())
+		main = append(main, strings.Split(vis, "\n")...)
+	}
+	if !l.wide() {
+		return [][]string{a.fade(left), a.fade(main)}
+	}
+
+	faded := a.popup != popupNone
+	right := slices.Clone(a.cache.nowPlaying.get(a.nowPlayingPanel.ViewKey(a.tick, faded), func() []string {
+		return fitLines(a.nowPlayingPanel.View(a.tick, faded), l.rightW, l.nowPlayingH)
+	}))
+	return [][]string{a.fade(left), a.fade(main), append(right, a.fade(queue())...)}
 }

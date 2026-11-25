@@ -235,7 +235,7 @@ tell application "Music"
 		if pKind is "none" then
 			try
 				set pCount to count of tracks of p
-				set output to output & name of p & "||" & pCount & "\n"
+				set output to output & pCount & "||" & name of p & "||\n"
 			end try
 		end if
 	end repeat
@@ -247,21 +247,18 @@ end tell`
 		return nil, err
 	}
 
+	// Names are kept as they are: Music finds playlists by their exact name,
+	// spaces at the ends included.
 	var playlists []models.Playlist
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	for _, line := range strings.Split(out, "\n") {
+		count, name, ok := strings.Cut(line, "||")
+		if !ok {
 			continue
 		}
-		parts := strings.SplitN(line, "||", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		count, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+		n, _ := strconv.Atoi(strings.TrimSpace(count))
 		playlists = append(playlists, models.Playlist{
-			Name:  strings.TrimSpace(parts[0]),
-			Count: count,
+			Name:  strings.TrimSuffix(name, "||"),
+			Count: n,
 		})
 	}
 	return playlists, nil
@@ -290,8 +287,8 @@ end tell`
 	var result []string
 	parts := strings.Split(out, "||")
 	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" && !unique[p] {
+		// Kept as it is, like playlist names.
+		if strings.TrimSpace(p) != "" && !unique[p] {
 			unique[p] = true
 			result = append(result, p)
 		}
@@ -316,8 +313,8 @@ end tell`
 	var result []string
 	parts := strings.Split(out, "||")
 	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" && !unique[p] {
+		// Kept as it is, like playlist names.
+		if strings.TrimSpace(p) != "" && !unique[p] {
 			unique[p] = true
 			result = append(result, p)
 		}
@@ -325,67 +322,64 @@ end tell`
 	return result, nil
 }
 
-// GetFilteredTracks returns tracks paginated based on context: "playlist", "artist", "album", "library"
-func GetFilteredTracks(contextType, contextValue string, offset, limit int) ([]models.Track, error) {
-	startIdx := offset + 1
-	endIdx := offset + limit
-	escapedType := escapeAppleScriptString(contextType)
-	escapedValue := escapeAppleScriptString(contextValue)
+// GetTracks returns every track of a context: "playlist", "artist", "album" or
+// "library". It asks for whole columns at once, because a request per track and
+// property takes seconds for a few hundred tracks.
+func GetTracks(contextType, contextValue string) ([]models.Track, error) {
+	value := escapeAppleScriptString(contextValue)
+	var source string
+	switch contextType {
+	case "playlist":
+		source = fmt.Sprintf(`tracks of playlist "%s"`, value)
+	case "artist":
+		source = fmt.Sprintf(`tracks of playlist "Library" whose artist is "%s"`, value)
+	case "album":
+		source = fmt.Sprintf(`tracks of playlist "Library" whose album is "%s"`, value)
+	case "library":
+		source = `tracks of playlist "Library"`
+	default:
+		return nil, fmt.Errorf("unknown context %q", contextType)
+	}
 
-	script := fmt.Sprintf(`
+	// Control characters separate fields and columns: no tag contains them.
+	out, err := run(fmt.Sprintf(`
 tell application "Music"
-	set output to ""
-	
-	if "%s" is "playlist" then
-		set trackList to (tracks of playlist "%s")
-	else if "%s" is "artist" then
-		set trackList to (tracks of playlist "Library" whose artist is "%s")
-	else if "%s" is "album" then
-		set trackList to (tracks of playlist "Library" whose album is "%s")
-	else if "%s" is "library" then
-		set trackList to tracks of playlist "Library"
-	end if
-	
-	set totalCount to count of trackList
-	set startIdx to %d
-	set endIdx to %d
-	if startIdx > totalCount then return ""
-	if endIdx > totalCount then set endIdx to totalCount
-	
-	repeat with i from startIdx to endIdx
-		set t to item i of trackList
-		set tName to name of t
-		set tArtist to artist of t
-		set tAlbum to album of t
-		set tDuration to duration of t as string
-		set output to output & tName & "||" & tArtist & "||" & tAlbum & "||" & tDuration & "\n"
-	end repeat
-	return output
-end tell`, escapedType, escapedValue, escapedType, escapedValue, escapedType, escapedValue, escapedType, startIdx, endIdx)
-
-	out, err := run(script)
+	if (count of (%s)) is 0 then return ""
+	set {n, r, b, d} to {name, artist, album, duration} of (%s)
+end tell
+set text item delimiters to (character id 31)
+set cols to {n as string, r as string, b as string, d as string}
+set text item delimiters to (character id 30)
+return cols as string`, source, source))
 	if err != nil || out == "" {
 		return nil, err
 	}
+	return parseTrackColumns(out)
+}
 
-	var tracks []models.Track
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+func parseTrackColumns(out string) ([]models.Track, error) {
+	var cols [4][]string
+	parts := strings.Split(out, "\x1e")
+	if len(parts) != len(cols) {
+		return nil, fmt.Errorf("unexpected reply from Music: %d columns", len(parts))
+	}
+	for i, p := range parts {
+		cols[i] = strings.Split(p, "\x1f")
+		if len(cols[i]) != len(cols[0]) {
+			return nil, fmt.Errorf("unexpected reply from Music: uneven columns")
 		}
-		parts := strings.SplitN(line, "||", 4)
-		if len(parts) < 4 {
-			continue
+	}
+
+	tracks := make([]models.Track, len(cols[0]))
+	for i := range tracks {
+		// AppleScript writes decimals the way the user's region does.
+		secs, _ := strconv.ParseFloat(strings.Replace(strings.TrimSpace(cols[3][i]), ",", ".", 1), 64)
+		tracks[i] = models.Track{
+			Name:     strings.TrimSpace(cols[0][i]),
+			Artist:   strings.TrimSpace(cols[1][i]),
+			Album:    strings.TrimSpace(cols[2][i]),
+			Duration: secs,
 		}
-		dur, _ := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
-		tracks = append(tracks, models.Track{
-			Name:     strings.TrimSpace(parts[0]),
-			Artist:   strings.TrimSpace(parts[1]),
-			Album:    strings.TrimSpace(parts[2]),
-			Duration: dur,
-		})
 	}
 	return tracks, nil
 }

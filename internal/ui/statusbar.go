@@ -5,162 +5,67 @@ import (
 	"math"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"SR-Player/internal/models"
+	"SR-Player/internal/ui/panels"
+	"SR-Player/internal/ui/theme"
 )
 
-type StatusBar struct {
-	width  int
-	notice string
-}
+const brand = "Apple Music TUI"
 
-var (
-	statusBarStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("#0C0E10")).
-			Foreground(lipgloss.Color("#CCCCCC")).
-			Padding(0, 2)
-
-	progressFilledStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FA243C"))
-
-	progressEmptyStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#333333"))
-
-	controlActiveStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FA243C")).
-				Bold(true)
-
-	controlInactiveStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#888888"))
-
-	timeStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#8C9299"))
-
-	hintKeyStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FA243C")).
-			Bold(true)
-
-	hintTextStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#565B61"))
-)
-
-func NewStatusBar(width int) StatusBar {
-	return StatusBar{width: width}
-}
-
-func (s *StatusBar) SetWidth(width int) {
-	s.width = width
-}
-
-// SetNotice replaces the key hints with text until it is set to "".
-func (s *StatusBar) SetNotice(text string) {
-	s.notice = text
-}
-
-func (s *StatusBar) View(np models.NowPlaying) string {
-	prevBtn := "⏮"
-	playBtn := "▶"
-	if np.State == models.StatePlaying {
-		playBtn = "⏸"
+// renderPlayer draws the playback bar. withTrack adds the track's name, for
+// when the Now Playing panel is not on screen.
+func renderPlayer(np models.NowPlaying, width int, withTrack bool) string {
+	title := "■ Stopped"
+	switch np.State {
+	case models.StatePlaying:
+		title = "▶ Playing"
+	case models.StatePaused:
+		title = "┃┃ Paused"
 	}
-	nextBtn := "⏭"
 
-	shuffleBtn := controlInactiveStyle.Render("⇄")
+	inner := width - 2
+	left := " "
+	if withTrack && np.Track.Name != "" {
+		name := ansi.Truncate(np.Track.Name, inner/4, "…")
+		artist := ansi.Truncate(np.Track.Artist, inner/6, "…")
+		left += theme.Bold.Render(name) + theme.Dim.Render(" "+artist) + "  "
+	}
+	elapsed, total := formatTime(np.Position), formatTime(np.Track.Duration)
+	barW := inner - ansi.StringWidth(left) - len(elapsed) - len(total) - 3
+	line := left + theme.Text.Render(elapsed) + " " +
+		renderProgressBar(np.Position, np.Track.Duration, barW) + " " + theme.Dim.Render(total)
+
+	frame := panels.Frame{Title: title, Info: playerInfo(np), Focused: np.State == models.StatePlaying}
+	return frame.Render(width, playerHeight, []string{line})
+}
+
+func playerInfo(np models.NowPlaying) string {
+	mode := func(icon, value string, on bool) string {
+		style := theme.Dim
+		if on {
+			style = theme.Active
+		}
+		return style.Render(" " + icon + " " + value + " ")
+	}
+
+	shuffle := "off"
 	if np.ShuffleEnabled {
-		shuffleBtn = controlActiveStyle.Render("⇄")
+		shuffle = "on"
+	}
+	repeat := np.RepeatMode
+	if repeat == "" {
+		repeat = models.RepeatOff
 	}
 
-	repeatIcon := "↺"
-	repeatStr := controlInactiveStyle.Render(repeatIcon)
-	switch np.RepeatMode {
-	case models.RepeatAll:
-		repeatStr = controlActiveStyle.Render("↺")
-	case models.RepeatOne:
-		repeatStr = controlActiveStyle.Render("↺¹")
-	}
+	const steps = 8
+	filled := clamp(int(math.Round(float64(np.Volume)/100*steps)), 0, steps)
+	volume := theme.Dim.Render(" vol ") + theme.Red.Render(strings.Repeat("━", filled)) +
+		theme.Faint.Render(strings.Repeat("━", steps-filled)) + theme.Dim.Render(fmt.Sprintf(" %3d%% ", np.Volume))
 
-	controls := fmt.Sprintf("  %s  %s  %s  ",
-		controlInactiveStyle.Render(prevBtn),
-		controlActiveStyle.Render(playBtn),
-		controlInactiveStyle.Render(nextBtn),
-	)
-	flagControls := fmt.Sprintf("  %s  %s  ", shuffleBtn, repeatStr)
-
-	elapsed := np.Position
-	total := np.Track.Duration
-
-	elapsedStr := formatTime(elapsed)
-	totalStr := formatTime(total)
-
-	controlsLen := lipgloss.Width(controls)
-	flagLen := lipgloss.Width(flagControls)
-	timeLen := len(elapsedStr) + len(totalStr) + 3
-	padding := 4
-
-	barWidth := s.width - controlsLen - flagLen - timeLen - padding
-	if barWidth < 4 {
-		barWidth = 4
-	}
-
-	progressBar := renderProgressBar(elapsed, total, barWidth)
-
-	row := lipgloss.JoinHorizontal(
-		lipgloss.Center,
-		controls,
-		timeStyle.Render(elapsedStr),
-		" ",
-		progressBar,
-		" ",
-		timeStyle.Render(totalStr),
-		flagControls,
-	)
-
-	quitHint := renderHintGroup("q", "quit")
-	hints := lipgloss.JoinHorizontal(
-		lipgloss.Left,
-		"  ",
-		renderHintGroup("1-5", "tabs"),
-		renderHintSpacer(),
-		renderHintGroup("/", "search"),
-		renderHintSpacer(),
-		renderHintGroup("z/x", "views"),
-		renderHintSpacer(),
-		renderHintGroup("space", "play"),
-		renderHintSpacer(),
-		renderHintGroup("n/p", "skip"),
-		renderHintSpacer(),
-		renderHintGroup("←/→", "seek"),
-		renderHintSpacer(),
-		renderHintGroup("+/-", "vol"),
-		renderHintSpacer(),
-		renderHintGroup("s r", "modes"),
-		renderHintSpacer(),
-	)
-	artHint := renderHintGroup("i", "art") + renderHintSpacer()
-	// The bar has room for two lines only: leave the hint out rather than wrap.
-	if lipgloss.Width(hints+artHint+quitHint) <= s.width-statusBarStyle.GetHorizontalPadding() {
-		hints += artHint
-	}
-	keyhints := hints + quitHint
-	if s.notice != "" {
-		keyhints = "  " + hintTextStyle.Render(s.notice)
-	}
-
-	full := lipgloss.JoinVertical(lipgloss.Left,
-		row,
-		keyhints,
-	)
-
-	return statusBarStyle.Width(s.width).MaxWidth(s.width).MaxHeight(2).Render(full)
-}
-
-func renderHintGroup(key, text string) string {
-	return hintKeyStyle.Render(key) + hintTextStyle.Render(" "+text)
-}
-
-func renderHintSpacer() string {
-	return hintTextStyle.Render("  •  ")
+	return mode("⇄", shuffle, np.ShuffleEnabled) +
+		mode("↺", string(repeat), repeat != models.RepeatOff) + volume
 }
 
 func renderProgressBar(elapsed, total float64, width int) string {
@@ -168,46 +73,83 @@ func renderProgressBar(elapsed, total float64, width int) string {
 		return ""
 	}
 	if total <= 0 {
-		return progressEmptyStyle.Render(strings.Repeat("─", width))
+		return theme.Faint.Render(strings.Repeat("━", width))
 	}
+	ratio := max(0, min(1, elapsed/total))
+	filled := clamp(int(math.Round(ratio*float64(width))), 0, width)
+	if filled == 0 || filled == width {
+		return theme.Red.Render(strings.Repeat("━", filled)) + theme.Faint.Render(strings.Repeat("━", width-filled))
+	}
+	return theme.Red.Render(strings.Repeat("━", filled-1)+"●") + theme.Faint.Render(strings.Repeat("━", width-filled))
+}
 
-	ratio := elapsed / total
-	if ratio > 1 {
-		ratio = 1
-	}
-	if ratio < 0 {
-		ratio = 0
-	}
+// hint is an action offered in the bottom line.
+type hint struct{ action, key string }
 
-	filled := int(math.Round(ratio * float64(width)))
-	if filled > width {
-		filled = width
+func hintsFor(focus panel) []hint {
+	var hints []hint
+	switch focus {
+	case panelTracks:
+		hints = append(hints, hint{"Play", "enter"})
+	case panelPlaylists, panelArtists, panelAlbums:
+		hints = append(hints, hint{"Open", "enter"})
 	}
-	if filled < 0 {
-		filled = 0
-	}
-	empty := width - filled
-	if empty < 0 {
-		empty = 0
-	}
+	return append(hints,
+		hint{"Pause", "space"}, hint{"Search", "/"}, hint{"Keybindings", "?"},
+		hint{"Next/Prev", "n/p"}, hint{"Panels", "1-5"}, hint{"Quit", "q"})
+}
 
-	if filled > 0 && filled < width {
-		filledPart := progressFilledStyle.Render(strings.Repeat("━", filled-1))
-		head := controlActiveStyle.Render("●")
-		rest := progressEmptyStyle.Render(strings.Repeat("─", empty))
-		return filledPart + head + rest
+// renderBottom draws the last line: the notice, or the main keys, and the brand.
+func renderBottom(width int, focus panel, notice, brandText string) string {
+	var left string
+	switch {
+	case notice != "":
+		left = " " + theme.Active.Render(notice)
+	default:
+		room := width - ansi.StringWidth(brandText) - 3
+		used := 0
+		for i, h := range hintsFor(focus) {
+			text := h.action + ": " + h.key
+			if i > 0 {
+				text = " | " + text
+			}
+			if used+ansi.StringWidth(text) > room {
+				break
+			}
+			used += ansi.StringWidth(text)
+			if i > 0 {
+				left += theme.Faint.Render(" | ")
+			}
+			left += theme.Dim.Render(h.action+": ") + theme.Artist.Render(h.key)
+		}
+		left = " " + left
 	}
-
-	return progressFilledStyle.Render(strings.Repeat("━", filled)) +
-		progressEmptyStyle.Render(strings.Repeat("─", empty))
+	brandW := ansi.StringWidth(brandText) + 1
+	return panels.Fit(left, max(0, width-brandW)) + theme.Dim.Render(brandText) + " "
 }
 
 func formatTime(secs float64) string {
-	if secs < 0 {
-		secs = 0
+	total := int(math.Round(max(0, secs)))
+	return fmt.Sprintf("%d:%02d", total/60, total%60)
+}
+
+// encryptedLabel scrambles base for a moment every ~10 seconds.
+func encryptedLabel(base string, tick int) string {
+	const periodTicks = 67 // ticks are ~150 ms, see tickCmd
+	const activeTicks = 14 // ~2.1 s
+
+	phase := tick % periodTicks
+	if tick < 0 || phase >= activeTicks {
+		return base
 	}
-	total := int(math.Round(secs))
-	m := total / 60
-	s := total % 60
-	return fmt.Sprintf("%d:%02d", m, s)
+
+	glyphs := []rune("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%&*+-=?")
+	out := []rune(base)
+	for i, r := range out {
+		// Keep some characters so that the label can still be guessed.
+		if r != ' ' && (tick+i)%6 != 0 {
+			out[i] = glyphs[(tick*17+i*31+phase*13)%len(glyphs)]
+		}
+	}
+	return string(out)
 }

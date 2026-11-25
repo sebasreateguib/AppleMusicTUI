@@ -15,11 +15,12 @@ A terminal-based Apple Music player for macOS, built with Go. Control your Apple
 ## ✨ Features
 
 - 🎧 **Now Playing panel** — album art rendered in the terminal using Unicode block characters, or as the real cover in Ghostty and Kitty (press `i`)
-- 📚 **Full library browsing** — Songs, Albums, Artists, and Playlists tabs
-- 🔍 **Search** — fuzzy search across your entire Apple Music library
+- 🪟 **Panel layout** — Playlists, Artists, Albums, Tracks and Up Next on one screen, with a live preview of whatever is selected
+- 📚 **Full library browsing** — every playlist, artist and album, without paging
+- 🔍 **Search** — search across your entire Apple Music library
 - 📊 **Equalizer visualizer** — bars driven by the real audio output through [cava](https://github.com/karlstav/cava)
 - ⌨️ **Keyboard-driven** — no mouse needed, fully navigable with hotkeys
-- 🍎 **Apple ASCII art** — decorative Apple logo always visible in the player panel
+- 🍎 **Apple ASCII art** — Apple logo on startup and when nothing is playing
 - 🔀 **Shuffle & repeat** — toggle shuffle/repeat modes from the keyboard
 - 🔊 **Volume control** — adjust volume inline
 
@@ -59,23 +60,22 @@ go run .
 
 | Key | Action |
 |-----|--------|
-| `1` | Albums tab |
-| `2` | Artists tab |
-| `3` | Songs tab |
-| `4` | Playlists tab |
-| `5` / `/` | Search |
-| `Space` | Play / Pause |
-| `n` | Next track |
-| `p` | Previous track |
-| `s` | Toggle shuffle |
-| `r` | Toggle repeat |
+| `1` – `5` | Focus Playlists / Artists / Albums / Tracks / Up Next |
+| `←` `→` / `h` `l` / `Tab` | Previous / next panel |
+| `↑` `↓` / `j` `k` | Move in a list |
+| `PgUp` `PgDn` / `g` `G` | Move a page / first, last |
+| `Enter` | Open the selection / play the track |
+| `Esc` | Back to the list on the left |
+| `c` | Go to the track that is playing |
+| `/` | Search |
+| `Space` | Play / pause |
+| `n` `p` | Next / previous track |
+| `,` `.` | Seek 10 s backward / forward |
+| `+` `-` | Volume |
+| `s` `r` | Shuffle / repeat |
 | `i` | Switch album art: pixelated / photo (Ghostty and Kitty only) |
-| `←` / `→` | Seek backward / forward |
-| `z` | Now Playing view |
-| `x` | Queue view |
-| `[` / `]` | Previous / Next tab |
-| `↑` / `↓` | Navigate list |
-| `Enter` | Select item |
+| `R` | Refresh the library |
+| `?` | All keybindings |
 | `q` | Quit |
 
 ---
@@ -94,16 +94,15 @@ SR-Player/
     ├── cava/                # cava child process (real audio levels)
     ├── models/              # Shared data types (Track, Playlist, NowPlaying, etc.)
     └── ui/                  # TUI layout and rendering
-        ├── app.go           # Main Bubble Tea model (Update loop)
-        ├── topbar.go        # Navigation tabs + brand
-        ├── statusbar.go     # Bottom status bar
+        ├── app.go           # Main Bubble Tea model (Update loop, View)
+        ├── keys.go          # Keybindings
+        ├── commands.go      # Calls to Music
+        ├── playback.go      # Playback context and shuffle order
         ├── layout.go        # Panel sizing
-        └── panels/          # Individual UI panels
-            ├── nowplaying.go
-            ├── tracklist.go
-            ├── playlists.go
-            ├── search.go
-            └── queue.go
+        ├── statusbar.go     # Player bar and bottom line
+        ├── viewcache.go     # Redraws only what changed
+        ├── theme/           # Colors
+        └── panels/          # Frame, lists, now playing, visualizer, popups
 ```
 
 <br/>

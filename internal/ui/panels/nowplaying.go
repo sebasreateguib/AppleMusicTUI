@@ -5,66 +5,56 @@ import (
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
-	"math"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"SR-Player/internal/artwork"
 	"SR-Player/internal/models"
+	"SR-Player/internal/ui/theme"
 )
 
+const (
+	maxArtRows = 20
+	minArtRows = 5
+	// nowPlayingChrome is every row but the artwork: the frame, a gap, the gap
+	// below the artwork, title, artist, album, a gap and the format.
+	nowPlayingChrome = 9
+)
+
+// NowPlayingPanel shows the artwork and details of the current track.
 type NowPlayingPanel struct {
 	nowPlaying  models.NowPlaying
 	artCache    string
 	artRendered string
+	artBlurred  string // artwork behind a popup
+	blurredFor  blurKey
 	artWidth    int
 	imageID     uint32 // image uploaded to the terminal, 0 to draw pixels
 	artImageID  uint32 // image used by artRendered
 	width       int
 	height      int
-	focused     bool
 }
 
-var (
-	npFocusedBorder = lipgloss.Color("#FA243C")
-	npBlurredBorder = lipgloss.Color("#2E3237")
+// blurKey is what artBlurred depends on.
+type blurKey struct {
+	path  string
+	width int
+}
 
-	appleAccentOnce    sync.Once
-	appleAccentContent string
+func NewNowPlayingPanel() NowPlayingPanel { return NowPlayingPanel{} }
 
-	trackTitleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF"))
-
-	trackArtistStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FF4D67")).
-				Bold(true)
-
-	trackAlbumStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#7A8088")).
-			Italic(true)
-
-	infoLabelStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#666B72"))
-
-	infoValueStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D5D9DE"))
-
-	volumeFilledStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#FA243C"))
-
-	volumeEmptyStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#333333"))
-)
-
-func NewNowPlayingPanel(width, height int) NowPlayingPanel {
-	return NowPlayingPanel{
-		width:  width,
-		height: height,
+// NowPlayingHeight returns the height the panel needs for the largest artwork
+// that fits, leaving at least reserved rows of maxHeight free.
+func NowPlayingHeight(width, maxHeight, reserved int) int {
+	rows := min((width-4)/2, maxArtRows, maxHeight-reserved-nowPlayingChrome)
+	if rows < minArtRows {
+		rows = -1 // no artwork, nor the gap below it
 	}
+	return rows + nowPlayingChrome
 }
 
 func (n *NowPlayingPanel) SetNowPlaying(np models.NowPlaying) {
@@ -87,49 +77,146 @@ func (n *NowPlayingPanel) SetImage(id uint32) {
 	n.ensureArtwork()
 }
 
-func (n *NowPlayingPanel) SetFocused(focused bool) {
-	n.focused = focused
-}
-
-func (n *NowPlayingPanel) targetArtworkWidth() int {
-	innerWidth := n.width - 6
-	if innerWidth < 12 {
-		innerWidth = 12
+// artworkWidth returns the width of the artwork in cells, 0 if it does not fit.
+func (n *NowPlayingPanel) artworkWidth() int {
+	rows := min((n.width-4)/2, maxArtRows, n.height-nowPlayingChrome)
+	if rows < minArtRows {
+		return 0
 	}
-	// Fixed content budget (lines):
-	//   title(1) + artist(1) + album(1) + state(1) + progress(1) + meta(1) + volume(1) + footer(1) = 8
-	//   apple ASCII art = 7 lines
-	//   minimum spacers between sections = 5 blank lines
-	//   box border = 2
-	// Total fixed overhead = 8 + 7 + 5 + 2 = 22
-	const fixedOverhead = 22
-	maxByHeight := (n.height - fixedOverhead) * 2
-	if maxByHeight < 8 {
-		maxByHeight = 8
-	}
-	if innerWidth > maxByHeight {
-		innerWidth = maxByHeight
-	}
-	if innerWidth > 38 {
-		innerWidth = 38
-	}
-	return innerWidth
+	return rows * 2
 }
 
 func (n *NowPlayingPanel) ensureArtwork() {
-	target := n.targetArtworkWidth()
-	if n.artRendered == "" || n.artCache != n.nowPlaying.ArtworkPath || n.artWidth != target || n.artImageID != n.imageID {
-		n.artCache = n.nowPlaying.ArtworkPath
-		n.artWidth = target
-		n.artImageID = n.imageID
-		if n.imageID != 0 {
-			rows := artworkRows(target)
-			artwork.Place(n.imageID, target, rows)
-			n.artRendered = artwork.Cells(n.imageID, target, rows)
-			return
+	target := n.artworkWidth()
+	if n.artCache == n.nowPlaying.ArtworkPath && n.artWidth == target && n.artImageID == n.imageID {
+		return
+	}
+	n.artCache = n.nowPlaying.ArtworkPath
+	n.artWidth = target
+	n.artImageID = n.imageID
+
+	// Not when a popup opens: the file may be gone by then.
+	if key := (blurKey{n.artCache, target}); key != n.blurredFor {
+		n.blurredFor = key
+		n.artBlurred = ""
+		if target > 0 {
+			n.artBlurred = renderBlurredArtwork(n.artCache, target)
 		}
+	}
+
+	switch {
+	case target == 0:
+		n.artRendered = ""
+	case n.imageID != 0:
+		rows := artworkRows(target)
+		artwork.Place(n.imageID, target, rows)
+		n.artRendered = artwork.Cells(n.imageID, target, rows)
+	default:
 		n.artRendered = renderArtwork(n.nowPlaying.ArtworkPath, target)
 	}
+}
+
+// title returns the only text that depends on the animation tick.
+func (n *NowPlayingPanel) title(tick int) string {
+	return marqueeText(n.nowPlaying.Track.Name, max(1, n.width-4), tick)
+}
+
+// NowPlayingKey identifies what NowPlayingPanel.View renders.
+type NowPlayingKey struct {
+	track         models.Track
+	artCache      string
+	artWidth      int
+	artImageID    uint32
+	width, height int
+	title         string
+	faded         bool
+}
+
+// ViewKey returns equal keys when View would render the same.
+func (n *NowPlayingPanel) ViewKey(tick int, faded bool) NowPlayingKey {
+	return NowPlayingKey{
+		track:      n.nowPlaying.Track,
+		artCache:   n.artCache,
+		artWidth:   n.artWidth,
+		artImageID: n.artImageID,
+		width:      n.width,
+		height:     n.height,
+		title:      n.title(tick),
+		faded:      faded,
+	}
+}
+
+// View renders the panel. Faded is for the screen behind a popup: it has no
+// colors, and the artwork is out of focus.
+func (n *NowPlayingPanel) View(tick int, faded bool) string {
+	inner := n.width - 2
+	frame := Frame{Title: "Now Playing", Faded: faded}
+	fade := func(lines ...string) []string {
+		if faded {
+			return Fade(lines)
+		}
+		return lines
+	}
+	track := n.nowPlaying.Track
+
+	if track.Name == "" {
+		lines := []string{""}
+		if logo := appleLogo(); n.height >= len(logo)+6 {
+			for _, l := range logo {
+				lines = append(lines, Center(theme.Red.Render(l), inner))
+			}
+			lines = append(lines, "")
+		}
+		lines = append(lines, Center(theme.Dim.Render("Nothing playing"), inner))
+		return frame.Render(n.width, n.height, fade(lines...))
+	}
+
+	lines := []string{""}
+	art := n.artRendered
+	if faded {
+		art = n.artBlurred
+	}
+	if art != "" {
+		for _, l := range strings.Split(art, "\n") {
+			lines = append(lines, Center(l, inner))
+		}
+		lines = append(lines, "")
+	}
+	textW := max(0, inner-2)
+	lines = append(lines, fade(
+		Center(theme.Bold.Render(n.title(tick)), inner),
+		Center(theme.Artist.Render(ansi.Truncate(track.Artist, textW, "…")), inner),
+		Center(theme.Dim.Render(ansi.Truncate(track.Album, textW, "…")), inner),
+		"",
+		Center(renderFormatBadge(normalizeFormat(track.Format)), inner),
+	)...)
+	return frame.Render(n.width, n.height, lines)
+}
+
+var (
+	appleLogoOnce  sync.Once
+	appleLogoLines []string
+)
+
+// appleLogo returns the ASCII logo as lines of equal width.
+func appleLogo() []string {
+	appleLogoOnce.Do(func() {
+		content, err := os.ReadFile("assets/am-ascii.txt")
+		if err != nil {
+			return
+		}
+		lines := strings.Split(strings.TrimRight(string(content), "\n"), "\n")
+		width := 0
+		for i, l := range lines {
+			lines[i] = strings.TrimPrefix(l, "     ")
+			width = max(width, len(lines[i]))
+		}
+		for i := range lines {
+			lines[i] = Fit(lines[i], width)
+		}
+		appleLogoLines = lines
+	})
+	return appleLogoLines
 }
 
 // artworkRows returns the height, in cells, of a square charWidth cells wide.
@@ -138,17 +225,7 @@ func artworkRows(charWidth int) int {
 }
 
 func renderArtwork(path string, charWidth int) string {
-	if path == "" {
-		return placeholderArt(charWidth)
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return placeholderArt(charWidth)
-	}
-	defer f.Close()
-
-	img, _, err := image.Decode(f)
+	img, err := decodeImage(path)
 	if err != nil {
 		return placeholderArt(charWidth)
 	}
@@ -193,11 +270,86 @@ func renderArtwork(path string, charWidth int) string {
 	return sb.String()
 }
 
-func safeRepeat(s string, count int) string {
-	if count <= 0 {
-		return ""
+// renderBlurredArtwork draws the artwork out of focus and darkened.
+func renderBlurredArtwork(path string, charWidth int) string {
+	const (
+		samples = 6 // per side of each pixel drawn
+		passes  = 2
+		light   = 0.38
+	)
+	rows := artworkRows(charWidth)
+	img, err := decodeImage(path)
+	if err != nil {
+		return strings.Join(Fade(strings.Split(placeholderArt(charWidth), "\n")), "\n")
 	}
-	return strings.Repeat(s, count)
+
+	// One pixel for each half of a cell, averaging the part of the image it covers.
+	type rgb [3]float64
+	w, h := charWidth, rows*2
+	b := img.Bounds()
+	pix := make([]rgb, w*h)
+	for y := range h {
+		for x := range w {
+			var sum rgb
+			for s := range samples * samples {
+				sx := b.Min.X + (x*samples+s%samples)*b.Dx()/(w*samples)
+				sy := b.Min.Y + (y*samples+s/samples)*b.Dy()/(h*samples)
+				pr, pg, pb, _ := img.At(sx, sy).RGBA()
+				sum[0] += float64(pr >> 8)
+				sum[1] += float64(pg >> 8)
+				sum[2] += float64(pb >> 8)
+			}
+			for c := range sum {
+				pix[y*w+x][c] = sum[c] / (samples * samples)
+			}
+		}
+	}
+
+	for range passes {
+		blurred := make([]rgb, len(pix))
+		for y := range h {
+			for x := range w {
+				var sum rgb
+				n := 0.0
+				for ny := max(0, y-1); ny <= min(h-1, y+1); ny++ {
+					for nx := max(0, x-1); nx <= min(w-1, x+1); nx++ {
+						for c := range sum {
+							sum[c] += pix[ny*w+nx][c]
+						}
+						n++
+					}
+				}
+				for c := range sum {
+					blurred[y*w+x][c] = sum[c] / n
+				}
+			}
+		}
+		pix = blurred
+	}
+
+	hex := func(p rgb) lipgloss.Color {
+		return lipgloss.Color(fmt.Sprintf("#%02x%02x%02x", int(p[0]*light), int(p[1]*light), int(p[2]*light)))
+	}
+	lines := make([]string, rows)
+	for y := range lines {
+		var sb strings.Builder
+		for x := range w {
+			top, bottom := pix[2*y*w+x], pix[(2*y+1)*w+x]
+			sb.WriteString(lipgloss.NewStyle().Background(hex(top)).Foreground(hex(bottom)).Render("▄"))
+		}
+		lines[y] = sb.String()
+	}
+	return strings.Join(lines, "\n")
+}
+
+func decodeImage(path string) (image.Image, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	img, _, err := image.Decode(f)
+	return img, err
 }
 
 func placeholderArt(charWidth int) string {
@@ -206,7 +358,7 @@ func placeholderArt(charWidth int) string {
 	}
 	charHeight := artworkRows(charWidth)
 
-	line := safeRepeat("░", charWidth)
+	line := strings.Repeat("░", charWidth)
 	mid := charHeight / 2
 	label := "  No Artwork  "
 	labelLen := len([]rune(label))
@@ -222,24 +374,13 @@ func placeholderArt(charWidth int) string {
 			if right < 0 {
 				right = 0
 			}
-			row := safeRepeat("░", pad) + label + safeRepeat("░", right)
+			row := strings.Repeat("░", pad) + label + strings.Repeat("░", right)
 			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#444444")).Render(row))
 		} else {
 			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#333333")).Render(line))
 		}
 	}
 	return strings.Join(lines, "\n")
-}
-
-func truncate(s string, maxLen int) string {
-	if maxLen <= 0 {
-		return ""
-	}
-	runes := []rune(s)
-	if len(runes) <= maxLen {
-		return s
-	}
-	return string(runes[:maxLen-1]) + "…"
 }
 
 // marqueeText scrolls a long string through a fixed-width window using the
@@ -282,132 +423,6 @@ func marqueeText(s string, maxWidth int, tick int) string {
 	return string(runes[offset : offset+maxWidth])
 }
 
-func renderAppleAccent(width int) string {
-	appleAccentOnce.Do(func() {
-		content, err := os.ReadFile("assets/am-ascii.txt")
-		if err != nil {
-			return
-		}
-		appleAccentContent = strings.TrimRight(string(content), "\n")
-	})
-
-	if appleAccentContent == "" {
-		return ""
-	}
-
-	lines := strings.Split(appleAccentContent, "\n")
-	for i, line := range lines {
-		for j := 0; j < 4 && strings.HasPrefix(line, " "); j++ {
-			line = strings.TrimPrefix(line, " ")
-		}
-		lines[i] = line
-	}
-	shifted := strings.Join(lines, "\n")
-
-	colored := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#A62E42")).
-		Render(shifted)
-
-	return lipgloss.Place(width, lipgloss.Height(shifted), lipgloss.Center, lipgloss.Top, colored)
-}
-
-func renderVolumeLine(width int, volume int) string {
-	if volume < 0 {
-		volume = 0
-	}
-	if volume > 100 {
-		volume = 100
-	}
-
-	label := "Vol "
-	pct := fmt.Sprintf(" %d%%", volume)
-	barW := width - lipgloss.Width(label) - lipgloss.Width(pct) - 2
-	if barW < 8 {
-		barW = 8
-	}
-
-	filled := int(math.Round((float64(volume) / 100.0) * float64(barW)))
-	if filled < 0 {
-		filled = 0
-	}
-	if filled > barW {
-		filled = barW
-	}
-	empty := barW - filled
-
-	bar := volumeFilledStyle.Render(strings.Repeat("█", filled)) +
-		volumeEmptyStyle.Render(strings.Repeat("░", empty))
-
-	return infoLabelStyle.Render(label) + bar + infoValueStyle.Render(pct)
-}
-
-func renderPlaybackLine(width int, elapsed, total float64) string {
-	if width < 16 {
-		width = 16
-	}
-	left := formatPlaybackTime(elapsed)
-	right := formatPlaybackTime(total)
-	barW := width - lipgloss.Width(left) - lipgloss.Width(right) - 4
-	if barW < 10 {
-		barW = 10
-	}
-
-	bar := renderInlineMeter(elapsed, total, barW, "━", "─", "●")
-	return lipgloss.JoinHorizontal(
-		lipgloss.Center,
-		infoValueStyle.Render(left),
-		" ",
-		bar,
-		" ",
-		infoValueStyle.Render(right),
-	)
-}
-
-func renderInlineMeter(value, total float64, width int, filled, empty, head string) string {
-	if width <= 0 {
-		return ""
-	}
-	if total <= 0 {
-		return volumeEmptyStyle.Render(strings.Repeat(empty, width))
-	}
-
-	ratio := value / total
-	if ratio < 0 {
-		ratio = 0
-	}
-	if ratio > 1 {
-		ratio = 1
-	}
-
-	filledCount := int(math.Round(ratio * float64(width)))
-	if filledCount < 0 {
-		filledCount = 0
-	}
-	if filledCount > width {
-		filledCount = width
-	}
-	emptyCount := width - filledCount
-
-	if filledCount > 0 && filledCount < width {
-		return volumeFilledStyle.Render(strings.Repeat(filled, filledCount-1)) +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4D67")).Bold(true).Render(head) +
-			volumeEmptyStyle.Render(strings.Repeat(empty, emptyCount))
-	}
-
-	return volumeFilledStyle.Render(strings.Repeat(filled, filledCount)) +
-		volumeEmptyStyle.Render(strings.Repeat(empty, emptyCount))
-}
-
-func formatPlaybackTime(secs float64) string {
-	if secs < 0 {
-		secs = 0
-	}
-	total := int(math.Round(secs))
-	m := total / 60
-	s := total % 60
-	return fmt.Sprintf("%d:%02d", m, s)
-}
-
 func normalizeFormat(raw string) string {
 	v := strings.ToLower(strings.TrimSpace(raw))
 	if strings.Contains(v, "dolby atmos") || (strings.Contains(v, "dolby") && strings.Contains(v, "atmos")) {
@@ -443,233 +458,4 @@ func renderFormatBadge(format string) string {
 			Padding(0, 1).
 			Render("◦ Standard")
 	}
-}
-
-func encryptedFooterLabel(base string, tick int) string {
-	// tick is emitted every ~150ms (see ui/tickCmd), so ~67 ticks ~= 10 seconds.
-	const periodTicks = 67
-	const activeTicks = 14 // ~2.1s of encrypted animation every 10s
-
-	if periodTicks <= 0 || tick < 0 {
-		return base
-	}
-
-	phase := tick % periodTicks
-	if phase >= activeTicks {
-		return base
-	}
-
-	glyphs := []rune("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%&*+-=?")
-	src := []rune(base)
-	out := make([]rune, len(src))
-
-	for i, r := range src {
-		if r == ' ' {
-			out[i] = r
-			continue
-		}
-		// Keep some original chars so the encrypted effect still hints at the label.
-		if (tick+i)%6 == 0 {
-			out[i] = r
-			continue
-		}
-		idx := (tick*17 + i*31 + phase*13) % len(glyphs)
-		out[i] = glyphs[idx]
-	}
-
-	return string(out)
-}
-
-// renderVisualizer draws one column per bar level (0-255), growing from the
-// bottom, with a blank column between bars.
-func renderVisualizer(levels []byte, width int, height int) string {
-	if height <= 0 || width <= 0 {
-		return ""
-	}
-	blocks := []rune(" ▁▂▃▄▅▆▇█")
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#FA243C"))
-	bars := (width + 1) / 2
-
-	rows := make([]string, height)
-	for y := range rows {
-		row := []rune(strings.Repeat(" ", width))
-		base := (height - 1 - y) * 8
-		for i := 0; i < bars && len(levels) > 0; i++ {
-			// Spread levels over the columns: the counts only differ while
-			// cava restarts after a resize, or on extremely wide terminals.
-			h := int(levels[i*len(levels)/bars]) * height * 8 / 255
-			row[i*2] = blocks[max(0, min(8, h-base))]
-		}
-		rows[y] = style.Render(string(row))
-	}
-	return strings.Join(rows, "\n")
-}
-
-// spacer returns n blank lines as a single joined string, or "" when n <= 0.
-func spacer(n int) string {
-	if n <= 0 {
-		return ""
-	}
-	lines := make([]string, n)
-	return strings.Join(lines, "\n")
-}
-
-func (n *NowPlayingPanel) View(tick int) string {
-	innerWidth := n.width - 4
-	if innerWidth < 20 {
-		innerWidth = 20
-	}
-	// Box border eats 2 lines (top + bottom).
-	innerHeight := n.height - 2
-	if innerHeight < 10 {
-		innerHeight = 10
-	}
-
-	np := n.nowPlaying
-	track := np.Track
-	isPlaying := np.State == models.StatePlaying
-
-	art := n.artRendered
-	if art == "" {
-		n.ensureArtwork()
-		art = n.artRendered
-	}
-
-	titleStr := track.Name
-	if titleStr == "" {
-		titleStr = "No track playing"
-	}
-	title := marqueeText(titleStr, innerWidth, tick)
-	artist := truncate(track.Artist, innerWidth)
-	album := truncate(track.Album, innerWidth)
-
-	titleLine := lipgloss.NewStyle().
-		Width(innerWidth).
-		Align(lipgloss.Center).
-		Bold(true).
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Render(title)
-	artistLine := lipgloss.NewStyle().Width(innerWidth).Align(lipgloss.Center).Render(trackArtistStyle.Render(artist))
-	albumLine := lipgloss.NewStyle().Width(innerWidth).Align(lipgloss.Center).Render(trackAlbumStyle.Render(album))
-	apple := renderAppleAccent(innerWidth)
-	progressLine := renderPlaybackLine(innerWidth, np.Position, track.Duration)
-	volumeLine := renderVolumeLine(innerWidth, np.Volume)
-	formatText := normalizeFormat(track.Format)
-	footerText := encryptedFooterLabel("Apple Music TUI", tick)
-	footerLine := lipgloss.NewStyle().
-		Width(innerWidth).
-		Align(lipgloss.Center).
-		Bold(true).
-		Foreground(lipgloss.Color("#FFFFFF")).
-		Render(footerText)
-
-	stateIcon := "⏸"
-	if isPlaying {
-		stateIcon = "▶"
-	}
-	stateStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FF4D67")).
-		Background(lipgloss.Color("#241116")).
-		Bold(true).
-		Padding(0, 2)
-	stateLine := lipgloss.NewStyle().
-		Width(innerWidth).
-		Align(lipgloss.Center).
-		Render(stateStyle.Render(stateIcon + "  " + string(np.State)))
-
-	metaLine := lipgloss.NewStyle().
-		Width(innerWidth).
-		Align(lipgloss.Center).
-		Render(renderFormatBadge(formatText))
-
-	// --- Responsive layout -------------------------------------------------
-	// Each slot has a guaranteed minimum so sections never collapse together.
-	// Remaining slack (after minimums) is distributed evenly across all slots.
-	artH := lipgloss.Height(art)
-	appleH := lipgloss.Height(apple)
-
-	// Fixed lines (1 each): title, artist, album, state, progress, meta, volume, footer = 8
-	fixedLines := artH + appleH + 8
-
-	// Minimum blank lines per slot: top | after-art | after-state | before-apple | after-apple
-	minSlots := []int{0, 1, 1, 2, 1}
-	totalMin := 0
-	for _, m := range minSlots {
-		totalMin += m
-	}
-
-	slack := innerHeight - fixedLines - totalMin
-	if slack < 0 {
-		slack = 0
-	}
-	const numSlots = 5
-	big := slack / numSlots
-	extra := slack % numSlots
-
-	slotSize := func(idx int) int {
-		s := minSlots[idx] + big
-		if idx < extra {
-			s++
-		}
-		return s
-	}
-
-	content := lipgloss.JoinVertical(
-		lipgloss.Center,
-		spacer(slotSize(0)), // top gap
-		art,
-		spacer(slotSize(1)), // between art and track info
-		titleLine,
-		artistLine,
-		albumLine,
-		stateLine,
-		spacer(slotSize(2)), // between state and playback controls
-		progressLine,
-		metaLine,
-		volumeLine,
-		spacer(slotSize(3)), // before apple logo
-		apple,
-		spacer(slotSize(4)), // after apple logo
-		footerLine,
-	)
-
-	border := npBlurredBorder
-	if n.focused {
-		border = npFocusedBorder
-	}
-	return renderRectBoxAligned(content, n.width, n.height, border, lipgloss.Center, lipgloss.Top)
-}
-
-// visualizerInnerSize returns the drawing area of a visualizer panel.
-func visualizerInnerSize(width, height int) (int, int) {
-	return width - 4, height - 4
-}
-
-// VisualizerBars returns how many bars fit in a visualizer panel of that width.
-func VisualizerBars(width int) int {
-	inner, _ := visualizerInnerSize(width, 0)
-	return (inner + 1) / 2
-}
-
-// RenderVisualizerPanel draws the bars, or notice in their place when non-empty.
-func RenderVisualizerPanel(width, height int, levels []byte, notice string, focused bool) string {
-	if height <= 0 || width <= 0 {
-		return ""
-	}
-
-	border := lipgloss.Color("#333333")
-	if focused {
-		border = lipgloss.Color("#FA243C")
-	}
-
-	innerWidth, innerHeight := visualizerInnerSize(width, height)
-	if innerWidth < 1 || innerHeight < 1 {
-		return ""
-	}
-	if notice != "" {
-		text := trackAlbumStyle.Render(truncate(notice, innerWidth))
-		return renderRectBoxAligned(text, width, height, border, lipgloss.Center, lipgloss.Center)
-	}
-	vis := renderVisualizer(levels, innerWidth, innerHeight)
-	return renderRectBox(vis, width, height, border, lipgloss.Bottom)
 }
